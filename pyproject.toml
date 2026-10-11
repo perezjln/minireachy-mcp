@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "minireachy-mcp"
+dynamic = ["version"]
+description = "MCP server (Streamable HTTP) for the Hugging Face / Pollen Robotics Reachy Mini daemon"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "MIT" }
+dependencies = [
+    # MCP Python SDK v2 (stable branch). Pinned exactly: the 2.x API is still evolving.
+    "mcp==2.3.0",
+    "httpx>=0.28.1,<0.29",
+    "pydantic>=2.12,<3",
+    "uvicorn>=0.31.1,<1",
+    "starlette>=0.48,<2",
+    "anyio>=4.9,<5",
+    # Perception / voice: WebRTC client for the daemon media stream, local STT and TTS
+    "aiortc==1.15.0",
+    "websockets>=15,<16",
+    "numpy>=2,<3",
+    "pillow>=11,<13",
+    "faster-whisper==1.2.1",
+    "piper-tts==1.8.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=9,<10",
+    "pyyaml>=6,<7",
+]
+
+[project.scripts]
+minireachy-mcp = "minireachy_mcp.__main__:main"
+
+[tool.hatch.version]
+path = "src/minireachy_mcp/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/minireachy_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "e2e: end-to-end tests against the running Docker Compose stack",
+]
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

@@ -1,0 +1,92 @@
+# MiniReachy MCP server. The MiniReachy daemon runs natively on the host; only the
+# MCP server is containerised.
+#
+#   docker compose up --build -d                      # start the MCP server
+#   docker compose --profile test run --rm tests      # unit/integration tests (no network, no robot)
+#   docker compose --profile e2e run --rm e2e         # end-to-end via the running server (read-only)
+
+name: minireachy-mcp
+
+x-hardening: &hardening
+  read_only: true
+  tmpfs:
+    - /tmp:size=16m
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  init: true
+
+services:
+  minireachy-mcp:
+    <<: *hardening
+    build:
+      context: .
+      target: runtime
+    image: minireachy-mcp:0.2.0
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MINIREACHY_BASE_URL: ${MINIREACHY_BASE_URL:-http://host.docker.internal:8000}
+      MINIREACHY_CONNECT_TIMEOUT: ${MINIREACHY_CONNECT_TIMEOUT:-3}
+      MINIREACHY_READ_TIMEOUT: ${MINIREACHY_READ_TIMEOUT:-15}
+      MCP_HOST: 0.0.0.0 # inside the container; publication below is restricted to loopback
+      MCP_PORT: "8765"
+      MCP_PATH: ${MCP_PATH:-/mcp}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*,[::1]:*,minireachy-mcp:*}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
+      ENABLE_PHYSICAL_ACTIONS: ${ENABLE_PHYSICAL_ACTIONS:-false}
+      ENABLE_ADMIN_ACTIONS: ${ENABLE_ADMIN_ACTIONS:-false}
+      ENABLE_PERCEPTION: ${ENABLE_PERCEPTION:-false}
+      MEDIA_SIGNALLING_URL: ${MEDIA_SIGNALLING_URL:-ws://host.docker.internal:8443}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      # Host loopback only: not reachable from the LAN.
+      - "127.0.0.1:${MCP_PUBLISH_PORT:-8765}:8765"
+    extra_hosts:
+      # Needed on Linux engines; harmless on Docker Desktop (resolves to the host there too).
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  tests:
+    profiles: [test]
+    build:
+      context: .
+      target: test
+    image: minireachy-mcp:0.2.0-test
+    # No network at all: proves the test suite cannot reach the real robot.
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+  e2e:
+    profiles: [e2e]
+    build:
+      context: .
+      target: test
+    image: minireachy-mcp:0.2.0-test
+    environment:
+      MCP_E2E_URL: http://minireachy-mcp:8765${MCP_PATH:-/mcp}
+      MCP_E2E_HEALTH_URL: http://minireachy-mcp:8765/healthz
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
+    command: ["python", "-m", "pytest", "-m", "e2e", "-v"]
+    depends_on:
+      minireachy-mcp:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
