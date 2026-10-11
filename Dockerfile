@@ -22,15 +22,15 @@ COPY requirements-test.lock /tmp/requirements-test.lock
 RUN pip install --require-hashes --only-binary=:all: -r /tmp/requirements-test.lock
 
 # ---------------------------------------------------------------------------------
-# Local speech models (faster-whisper + Piper French voice), pinned revisions.
+# Local speech models (faster-whisper + Piper French and English voices), pinned revisions.
 # Downloaded at build time only: the runtime container never fetches models.
 FROM deps AS models
 ARG WHISPER_REPO=Systran/faster-whisper-small
 ARG WHISPER_REVISION=536b0662742c02347bc0e980a01041f333bce120
-ARG PIPER_VOICE=fr/fr_FR/siwis/medium/fr_FR-siwis-medium
+ARG PIPER_VOICES=fr/fr_FR/siwis/medium/fr_FR-siwis-medium,en/en_US/lessac/medium/en_US-lessac-medium
 ARG PIPER_REVISION=c10ece1aade47bb51c153c893d14e5bf8e5b7117
 COPY scripts/download_models.py /tmp/download_models.py
-RUN python /tmp/download_models.py "$WHISPER_REPO" "$WHISPER_REVISION" "$PIPER_VOICE" "$PIPER_REVISION" /opt/models
+RUN python /tmp/download_models.py "$WHISPER_REPO" "$WHISPER_REVISION" "$PIPER_VOICES" "$PIPER_REVISION" /opt/models
 
 # ---------------------------------------------------------------------------------
 FROM ${PYTHON_IMAGE} AS base

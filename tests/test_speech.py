@@ -39,6 +39,18 @@ def test_tts_then_stt_round_trip() -> None:
     assert transcript.language == "fr"
 
 
+@pytest.mark.skipif(not (models_present and S.tts_voice_path_en and os.path.exists(S.tts_voice_path_en)),
+                    reason="English voice not baked into this image")
+def test_english_tts_then_stt_round_trip() -> None:
+    tts = TextToSpeech(S.tts_voice_path_en, language="en")
+    stt = SpeechToText(S.stt_model_path, initial_prompt=S.stt_initial_prompt)
+    tts.warmup()
+    speech = tts.synthesize("Hello, the weather is nice today.")
+    transcript = stt.transcribe(to_16k(speech.wav), language="en")
+    assert transcript.rejected_reason is None
+    assert "hello" in transcript.text.lower() and "weather" in transcript.text.lower()
+
+
 @needs_models
 def test_speed_changes_duration() -> None:
     tts = TextToSpeech(S.tts_voice_path)

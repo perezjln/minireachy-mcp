@@ -4,8 +4,8 @@ Serveur **MCP (Model Context Protocol)** pour piloter un robot **Reachy Mini** (
 
 * Le serveur MCP tourne **dans Docker Compose**. Le daemon MiniReachy reste sur la machine hôte et n'est jamais installé dans le conteneur.
 * Le transport est **Streamable HTTP** sur `http://127.0.0.1:8765/mcp`, avec le SDK Python officiel `mcp==2.3.0` (branche v2).
-* **65 outils** couvrent les 57 opérations pertinentes de l'API du daemon (v1.8.0). 10 opérations sont exclues, chacune avec une justification. Voir [docs/inventaire-api.md](docs/inventaire-api.md).
-* **Perception et voix** : Reachy voit (caméra), écoute (micros, reconnaissance vocale locale faster-whisper) et parle (synthèse vocale locale Piper, voix française). Le tout passe par le flux WebRTC du daemon, sans accès USB depuis le conteneur.
+* **68 outils** couvrent les 57 opérations pertinentes de l'API du daemon (v1.8.0). 10 opérations sont exclues, chacune avec une justification. Voir [docs/inventaire-api.md](docs/inventaire-api.md).
+* **Perception et voix** : Reachy voit (caméra), écoute (micros, reconnaissance vocale locale faster-whisper) et parle (synthèse vocale locale Piper, voix française, ou anglaise avec `language="en"`). Le tout passe par le flux WebRTC du daemon, sans accès USB depuis le conteneur.
 * **Skill conversationnel** : [.claude/skills/reachy-conversation](.claude/skills/reachy-conversation/SKILL.md) transforme Reachy en agent conversationnel piloté par Claude.
 * Les actions physiques, les actions d'administration et la perception (caméra et micros) sont **refusées par défaut**.
 
@@ -71,6 +71,7 @@ Toutes les variables sont documentées dans [.env.example](.env.example). Les pr
 | `ENABLE_PERCEPTION` | `false` | Autorise la caméra (`capture_image`) et l'écoute (`listen`) |
 | `MEDIA_SIGNALLING_URL` | `ws://host.docker.internal:8443` | Signalisation WebRTC du serveur média du daemon |
 | `STT_LANGUAGE`, `STT_BEAM_SIZE`, `TTS_LENGTH_SCALE` | `fr`, `1`, `1.0` | Langue et réglages de la reconnaissance et de la synthèse vocales |
+| `TTS_VOICE_PATH_EN` | voix `en_US-lessac-medium` | Voix anglaise, utilisée quand `speak`/`converse` reçoivent `language="en"`. Vide = désactivée |
 | `LIMIT_*` | voir `.env.example` | Garde-fous de `goto_pose`, propres au serveur MCP |
 
 Aucun secret ne figure dans l'image ni dans le dépôt : `.env` est ignoré par git et par le contexte de build Docker.
@@ -246,7 +247,9 @@ Tous les outils renvoient du JSON structuré (`structuredContent`). Les erreurs 
 | `get_perception_status` | aucun (lecture) | État du flux WebRTC (images et audio reçus) et des modèles vocaux. N'ouvre pas le flux |
 | `capture_image` | `ENABLE_PERCEPTION` | Photo JPEG de la caméra de la tête (ce que voit Reachy), redimensionnable |
 | `listen` | `ENABLE_PERCEPTION` | Attend qu'on parle, enregistre jusqu'à une pause et transcrit (faster-whisper local). Ignore les bruits et la fin de sa propre voix, et renvoie la direction de la voix |
-| `converse` | `ENABLE_PERCEPTION` (+ `ENABLE_PHYSICAL_ACTIONS` pour parler et faire un geste) | **Un tour de conversation en un seul appel** : dit une phrase (avec un geste d'antennes en parallèle), écoute la réponse, la transcrit et peut prendre une photo. Renvoie les temps mesurés |
+| `converse` | `ENABLE_PERCEPTION` (+ `ENABLE_PHYSICAL_ACTIONS` pour parler et bouger) | **Un tour de conversation en un seul appel** : dit une phrase en bougeant (geste d'antennes `salut`/`joie`/`curiosite`, geste de tête `oui`/`non`, tête tournée vers un point de la dernière image avec `look_at_point` ou d'un angle relatif avec `head_turn`), écoute la réponse et la transcrit. Avec `look="auto"` (défaut), une photo est jointe seulement si la réponse demande de regarder (« regarde », « tu vois », « écrit », « see »…). Renvoie les temps mesurés |
+| `look_at_point` | `ENABLE_PHYSICAL_ACTIONS` | Tourne la tête pour amener au centre le pixel (x, y) de la dernière image renvoyée. Calcul à partir des intrinsèques de la caméra (`/api/camera/specs`) et de la pose de la tête mémorisée au moment de la photo |
+| `nudge_head` | `ENABLE_PHYSICAL_ACTIONS` | Tourne la tête d'un petit angle relatif (« un peu à droite ») et la redresse |
 | `speak` | `ENABLE_PHYSICAL_ACTIONS` | Synthèse vocale locale (Piper), envoyée en continu sur la connexion WebRTC (repli : upload puis `play_sound`). Rend la main à la fin de la lecture |
 | `turn_toward_sound` | `ENABLE_PHYSICAL_ACTIONS` | Tourne la tête (lacet) vers la direction de la dernière voix détectée |
 
@@ -265,7 +268,9 @@ haut-parleur  ◀─ daemon (pipeline de lecture permanent) ◀─ WebRTC (Opus)
 
 La voix de Reachy passe **par la même connexion WebRTC**, dans l'autre sens. Le serveur média du daemon rend sa piste audio bidirectionnelle et joue ce que le client envoie, via un pipeline de lecture créé une seule fois (avec l'analyse des oscillations de tête). Par rapport à l'ancien chemin (upload puis `play_sound`), cela supprime environ 1 s par phrase : le daemon y reconstruisait un pipeline GStreamer à chaque son, en bloquant sa boucle d'événements. Cela permet aussi de commencer à parler pendant que les phrases suivantes sont encore synthétisées, et de savoir précisément quand la lecture se termine. Si la connexion n'est pas disponible, le serveur revient automatiquement à `play_sound` (le champ `output` indique le chemin utilisé ; réglage `SPEECH_OUTPUT`).
 
-Les modèles (`Systran/faster-whisper-small` et `rhasspy/piper-voices`, révisions épinglées) sont **téléchargés à la construction de l'image** et intégrés à l'image (environ 550 Mo). À l'exécution, rien n'est téléchargé et aucun audio ni aucune image ne sort de la machine.
+Les modèles (`Systran/faster-whisper-small` et `rhasspy/piper-voices`, révisions épinglées) sont **téléchargés à la construction de l'image** et intégrés à l'image (environ 610 Mo). À l'exécution, rien n'est téléchargé et aucun audio ni aucune image ne sort de la machine.
+
+**Deux voix** : française (`fr_FR-siwis-medium`, par défaut) et anglaise (`en_US-lessac-medium`). `speak` et `converse` prennent un paramètre `language` (`"en"` pour l'anglais). Dans `converse`, il choisit aussi la langue de la reconnaissance vocale. Les deux voix sont chargées par le préchauffage au démarrage : changer de langue en cours de conversation ne coûte rien (simple choix dans une table, pas de chargement). Une langue sans voix installée retombe sur la voix française (le champ `voice` du résultat l'indique).
 
 Performances mesurées sur cet hôte (CPU, Docker Desktop) :
 

@@ -44,6 +44,7 @@ REAL_NOTE = {
 RISK_FR = {
     Risk.READ: "Lecture", Risk.CONFIG: "Configuration", Risk.STOP: "Arrêt (toujours autorisé)",
     Risk.PHYSICAL: "Physique", Risk.ADMIN: "Administration", Risk.PHYSICAL_ADMIN: "Physique + administration",
+    Risk.PERCEPTION: "Perception",
 }
 EFFECTS = {
     Risk.READ: "Aucun",
@@ -52,6 +53,7 @@ EFFECTS = {
     Risk.PHYSICAL: "Mouvement, couple moteur, son ou app pilotant le robot",
     Risk.ADMIN: "Cycle de vie / installation / matériel",
     Risk.PHYSICAL_ADMIN: "Cycle de vie du backend, peut faire bouger le robot",
+    Risk.PERCEPTION: "Caméra ou micros",
 }
 
 
@@ -91,7 +93,9 @@ def main() -> None:
             resp = _ref(op.get("responses", {}).get("200", {}).get("content", {}).get("application/json", {}).get("schema", {}))
             tools = by_endpoint.get(key, [])
             if tools:
-                risk = Risk.READ if method == "get" else max((t.risk for t in tools), key=list(Risk).index)
+                # A daemon write is never "perception": converse speaks/moves through it as a physical action.
+                risks = [Risk.PHYSICAL if t.risk == Risk.PERCEPTION else t.risk for t in tools]
+                risk = Risk.READ if method == "get" else max(risks, key=list(Risk).index)
                 tool_names = ", ".join(f"`{t.name}`" for t in tools)
                 if key in REAL_OK:
                     status = "Implémenté et testé (simulation + daemon réel)"

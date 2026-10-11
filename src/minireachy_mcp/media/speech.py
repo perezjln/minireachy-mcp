@@ -61,13 +61,15 @@ class SpeechToText:
         """Blocking; run it in a worker thread."""
         started = time.perf_counter()
         model = self._load()
+        language = language or self.language
         segments, info = model.transcribe(
             audio.astype(np.float32),
-            language=language or self.language,
+            language=language,
             beam_size=self.beam_size,
             vad_filter=self.vad_filter,
             condition_on_previous_text=False,
-            initial_prompt=self.initial_prompt,
+            # The configured prompt is written in the configured language: do not bias another one.
+            initial_prompt=self.initial_prompt if language == self.language else None,
             without_timestamps=True,
         )
         segs = list(segments)
@@ -104,10 +106,14 @@ class Speech:
     seconds: float
 
 
+_WARMUP_TEXT = {"fr": "Bonjour.", "en": "Hello."}
+
+
 class TextToSpeech:
-    def __init__(self, voice_path: str, *, length_scale: float = 1.0) -> None:
+    def __init__(self, voice_path: str, *, length_scale: float = 1.0, language: str = "fr") -> None:
         self.voice_path = voice_path
         self.length_scale = length_scale
+        self.language = language
         self._voice: Any = None
         self._lock = threading.Lock()
 
@@ -149,5 +155,5 @@ class TextToSpeech:
     def warmup(self) -> float:
         """Load the voice and synthesise once so the first real call is not slowed down."""
         started = time.perf_counter()
-        self.synthesize("Bonjour.")
+        self.synthesize(_WARMUP_TEXT.get(self.language, "Hello."))
         return round(time.perf_counter() - started, 2)

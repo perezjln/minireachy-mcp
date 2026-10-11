@@ -100,7 +100,12 @@ class StubSTT:
 class StubTTS:
     loaded = True
 
+    def __init__(self, voice_path: str = "/stub/fr.onnx") -> None:
+        self.voice_path = voice_path
+        self.spoken: list[str] = []
+
     def stream(self, text: str, length_scale: float | None = None):
+        self.spoken.append(text)
         for _ in range(2):  # two "sentences" of 0.5 s at 22.05 kHz
             yield np.full(11025, 1000, dtype=np.int16), 22050
 
@@ -122,6 +127,7 @@ class StubMedia:
         self.link = StubLink()
         self.stt = StubSTT()
         self.tts = StubTTS()
+        self.voices = {"en": StubTTS("/stub/en.onnx")}
 
     async def aclose(self) -> None:
         pass
@@ -293,15 +299,59 @@ async def test_converse_speech_refused_without_physical(fake, mcp_session, media
     assert fake.non_get_calls() == []
 
 
+async def test_converse_in_english_uses_english_voice_and_recognition(fake, mcp_session, media) -> None:
+    media.link.speech_after_s = 0.4
+    languages: list[str | None] = []
+    original = media.stt.transcribe
+
+    def spy(audio, language=None):
+        languages.append(language)
+        return original(audio, language)
+
+    media.stt.transcribe = spy  # type: ignore[method-assign]
+    async with mcp_session(media=media, enable_physical_actions=True, enable_perception=True) as (client, _):
+        r = await client.call_tool("converse", {"say_text": "Hello!", "language": "en", "max_wait_s": 5})
+    assert not r.is_error, text_of(r)
+    out = json_part(r)
+    assert out["voice"] == "en" and out["heard"] is True
+    assert media.voices["en"].spoken == ["Hello!"] and media.tts.spoken == []
+    assert languages and set(languages) == {"en"}
+
+
+async def test_speak_default_and_unknown_language_use_default_voice(fake, mcp_session, media) -> None:
+    async with mcp_session(media=media, enable_physical_actions=True, enable_perception=True) as (client, _):
+        r1 = await client.call_tool("speak", {"text": "Bonjour"})
+        r2 = await client.call_tool("speak", {"text": "Hallo", "language": "de"})
+    assert r1.structured_content["voice"] == "fr"
+    assert r2.structured_content["voice"].startswith("fr (no 'de' voice")
+    assert media.tts.spoken == ["Bonjour", "Hallo"] and media.voices["en"].spoken == []
+
+
+async def test_perception_status_lists_voices(fake, mcp_session, media) -> None:
+    async with mcp_session(media=media) as (client, _):
+        r = await client.call_tool("get_perception_status", {})
+    voices = r.structured_content["text_to_speech"]["voices"]
+    assert set(voices) == {"fr", "en"} and voices["en"]["voice"] == "/stub/en.onnx"
+
+
+def test_from_settings_builds_english_voice_unless_disabled() -> None:
+    from minireachy_mcp.config import load_settings
+    from minireachy_mcp.media.services import MediaServices
+
+    assert set(MediaServices.from_settings(load_settings({})).voices) == {"en"}
+    assert MediaServices.from_settings(load_settings({"TTS_VOICE_PATH_EN": ""})).voices == {}
+
+
 async def test_warmup_loads_models_and_opens_stream_without_robot_action(fake) -> None:
     from minireachy_mcp.media.services import MediaServices
 
     stub = StubMedia()
-    services = MediaServices(link=stub.link, stt=stub.stt, tts=stub.tts)
+    services = MediaServices(link=stub.link, stt=stub.stt, tts=stub.tts, voices=stub.voices)
     services.start_warmup()
     await services._warmup_task
     assert services.warmup_report["state"] == "done"
     assert services.warmup_report["speech_to_text_s"] == 0.01 and "media_link_s" in services.warmup_report
+    assert services.warmup_report["text_to_speech_en_s"] == 0.01
     assert stub.link.connected == 1 and fake.requests == []
     await services.aclose()
 
@@ -344,3 +394,145 @@ async def test_stop_sound_clears_the_voice_stream(fake, mcp_session, media) -> N
     async with mcp_session(media=media) as (client, _):
         r = await client.call_tool("stop_sound", {})
     assert r.structured_content["voice_stream_cleared"] is True and media.link.speaker.cleared == 1
+
+
+# -- gaze: look_at_point, nudge_head, head motion and automatic look in converse -----------
+
+BASE = {"pitch": 0.0262, "yaw": -0.0176}  # fake daemon present head pose
+REAL_SPECS = {
+    "name": "lite",
+    "available_resolutions": [{"name": "R1920x1080at60fps", "width": 1920, "height": 1080, "fps": 60,
+                               "crop_factor": 1.115},
+                              {"name": "R3840x2592at30fps", "width": 3840, "height": 2592, "fps": 30,
+                               "crop_factor": 1.0}],
+    "default_resolution": {"name": "R1920x1080at60fps", "width": 1920, "height": 1080, "fps": 60,
+                           "crop_factor": 1.115},
+    "K": [[2001.8, 0.0, 1905.9], [0.0, 2003.1, 1328.3], [0.0, 0.0, 1.0]],
+    "D": [0.0],
+}
+
+
+def head_gotos(fake) -> list[dict]:
+    return [c.body for c in fake.calls("POST") if c.path == "/api/move/goto" and "head_pose" in c.body]
+
+
+def answer(text: str):
+    return lambda audio, language=None: Transcript(text=text, language="fr", language_probability=0.99,
+                                                   no_speech_probability=0.01, seconds=0.1)
+
+
+async def test_look_at_point_needs_an_image_first(fake, mcp_session, media) -> None:
+    async with mcp_session(media=media, enable_physical_actions=True, enable_perception=True) as (client, _):
+        r = await client.call_tool("look_at_point", {"x": 100, "y": 100})
+    assert r.is_error and "no image yet" in text_of(r) and fake.non_get_calls() == []
+
+
+async def test_look_at_point_uses_camera_intrinsics_and_pose_at_capture(fake, mcp_session, media) -> None:
+    fake.overrides["GET /api/camera/specs"] = Override(body=REAL_SPECS)
+    async with mcp_session(media=media, enable_physical_actions=True, enable_perception=True) as (client, _):
+        await client.call_tool("capture_image", {})  # 1024x576 from a 1920x1080 frame
+        # The head moves after the photo: the target must still be computed from the capture pose.
+        fake.overrides["GET /api/state/present_head_pose"] = Override(
+            body={"x": 0, "y": 0, "z": 0, "roll": 0.1, "pitch": 0.3, "yaw": 0.5})
+        center = await client.call_tool("look_at_point", {"x": 512, "y": 288})
+        right_low = await client.call_tool("look_at_point", {"x": 1024, "y": 576})
+    assert not center.is_error, text_of(center)
+    focal = 2001.8 * 1920 / 3840 * 1.115 * 1024 / 1920  # ~595 px in the returned image
+    first, second = head_gotos(fake)
+    assert first["head_pose"]["yaw"] == pytest.approx(BASE["yaw"], abs=1e-3)
+    assert first["head_pose"]["roll"] == 0.0  # straightened
+    assert second["head_pose"]["yaw"] == pytest.approx(BASE["yaw"] - math.atan(512 / focal), abs=1e-3)
+    assert second["head_pose"]["pitch"] == pytest.approx(BASE["pitch"] + math.atan(288 / focal), abs=1e-3)
+    assert right_low.structured_content["clamped"] is False
+
+
+async def test_look_at_point_rejects_points_outside_and_clamps(fake, mcp_session, media) -> None:
+    async with mcp_session(media=media, enable_physical_actions=True, enable_perception=True) as (client, _):
+        await client.call_tool("capture_image", {"max_width": 640})
+        outside = await client.call_tool("look_at_point", {"x": 700, "y": 10})
+        fake.overrides["GET /api/state/present_head_pose"] = Override(
+            body={"x": 0, "y": 0, "z": 0, "roll": 0, "pitch": 0, "yaw": 1.1})
+        await client.call_tool("capture_image", {"max_width": 640})
+        clamped = await client.call_tool("look_at_point", {"x": 0, "y": 180})
+    assert outside.is_error and "outside the last image" in text_of(outside)
+    assert clamped.structured_content["clamped"] is True
+    assert head_gotos(fake)[-1]["head_pose"]["yaw"] == 1.2  # guard rail
+
+
+async def test_nudge_head_is_relative_to_present_pose(fake, mcp_session, media) -> None:
+    async with mcp_session(media=media, enable_physical_actions=True) as (client, _):
+        r = await client.call_tool("nudge_head", {"yaw": -0.15, "pitch": 0.1})
+    assert not r.is_error, text_of(r)
+    pose = head_gotos(fake)[0]["head_pose"]
+    assert pose["yaw"] == pytest.approx(BASE["yaw"] - 0.15, abs=1e-3)
+    assert pose["pitch"] == pytest.approx(BASE["pitch"] + 0.1, abs=1e-3)
+    assert pose["roll"] == 0.0 and pose["x"] == 0.0
+
+
+async def test_nudge_head_refused_without_physical(fake, mcp_session, media) -> None:
+    async with mcp_session(media=media) as (client, _):
+        r = await client.call_tool("nudge_head", {"yaw": 0.1})
+    assert r.is_error and fake.non_get_calls() == []
+
+
+async def test_converse_turns_head_then_gestures_while_speaking(fake, mcp_session, media) -> None:
+    async with mcp_session(media=media, enable_physical_actions=True, enable_perception=True) as (client, _):
+        await client.call_tool("capture_image", {})
+        started = time.monotonic()
+        r = await client.call_tool("converse", {"say_text": "Je regarde !", "gesture_name": "joie",
+                                                "look_at_point": [800, 288], "listen_after": False})
+        elapsed = time.monotonic() - started
+    assert not r.is_error, text_of(r)
+    out = json_part(r)
+    gotos = [c.body for c in fake.calls("POST") if c.path == "/api/move/goto"]
+    assert "head_pose" in gotos[0] and all("head_pose" not in g for g in gotos[1:])  # head, then antennas
+    assert out["head"]["head_pose"]["yaw"] < BASE["yaw"] and out["gesture"]["steps_sent"] == 5
+    assert "image" not in out  # nothing heard, nothing to look at
+    assert elapsed < 4.0
+
+
+async def test_converse_head_turn_and_head_gesture(fake, mcp_session, media) -> None:
+    async with mcp_session(media=media, enable_physical_actions=True, enable_perception=True) as (client, _):
+        r = await client.call_tool("converse", {"say_text": "Oui !", "gesture_name": "oui",
+                                                "head_turn": [0.3, 0.0], "listen_after": False})
+    assert not r.is_error, text_of(r)
+    poses = [g["head_pose"] for g in head_gotos(fake)]
+    target = poses[0]
+    assert target["yaw"] == pytest.approx(BASE["yaw"] + 0.3, abs=1e-3)
+    assert len(poses) == 1 + 4  # turn, then the 4 nod steps around the new direction
+    assert all(p["yaw"] == pytest.approx(target["yaw"], abs=1e-3) for p in poses[1:])
+    assert max(p["pitch"] for p in poses[1:]) == pytest.approx(target["pitch"] + 0.15, abs=1e-3)
+    assert poses[-1]["pitch"] == pytest.approx(target["pitch"], abs=1e-3)
+
+
+async def test_converse_rejects_both_head_targets(fake, mcp_session, media) -> None:
+    async with mcp_session(media=media, enable_physical_actions=True, enable_perception=True) as (client, _):
+        r = await client.call_tool("converse", {"say_text": "x", "look_at_point": [1, 1], "head_turn": [0.1, 0]})
+    assert r.is_error and fake.non_get_calls() == []
+
+
+@pytest.mark.parametrize(
+    "heard,expect_image",
+    [("Regarde ce que j'ai dans la main", True), ("Qu'est-ce qui est écrit dessus ?", True),
+     ("Can you see this?", True), ("Bonjour Reachy", False), ("Au revoir Reachy", False)],
+)
+async def test_converse_auto_look_on_visual_cues(fake, mcp_session, media, heard, expect_image) -> None:
+    media.link.speech_after_s = 0.3
+    media.stt.transcribe = answer(heard)  # type: ignore[method-assign]
+    async with mcp_session(media=media, enable_physical_actions=True, enable_perception=True) as (client, _):
+        r = await client.call_tool("converse", {"say_text": "Vas-y", "max_wait_s": 5})
+    out = json_part(r)
+    assert out["text"] == heard
+    assert any(c.type == "image" for c in r.content) is expect_image
+    assert ("look" in out) is expect_image
+
+
+async def test_converse_look_never_and_bool_compat(fake, mcp_session, media) -> None:
+    media.link.speech_after_s = 0.3
+    media.stt.transcribe = answer("Regarde")  # type: ignore[method-assign]
+    async with mcp_session(media=media, enable_perception=True) as (client, _):
+        never = await client.call_tool("converse", {"look": "never", "max_wait_s": 5})
+        media.link.speech_after_s = None
+        legacy = await client.call_tool("converse", {"look": True, "listen_after": False})
+    assert not any(c.type == "image" for c in never.content)
+    assert any(c.type == "image" for c in legacy.content) and json_part(legacy)["look"] == "requested"

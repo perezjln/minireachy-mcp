@@ -87,6 +87,9 @@ class Settings(BaseModel):
     stt_vad_filter: bool = False
     stt_initial_prompt: str | None = "Conversation en français avec Reachy, un petit robot."
     tts_voice_path: str = "/opt/models/piper/fr_FR-siwis-medium.onnx"
+    tts_language: str = Field("fr", pattern=r"^[a-z]{2}$")  # language of tts_voice_path (default voice)
+    # Second voice, chosen per call with language="en"; empty disables it. Loaded by the warm-up.
+    tts_voice_path_en: str | None = "/opt/models/piper/en_US-lessac-medium.onnx"
     tts_length_scale: float = Field(1.0, gt=0.3, le=3.0)
     # Listening defaults (overridable per call)
     listen_silence_ms: int = Field(700, ge=300, le=3000)
@@ -104,6 +107,11 @@ class Settings(BaseModel):
         if not v.startswith(("ws://", "wss://")):
             raise ValueError("MEDIA_SIGNALLING_URL must start with ws:// or wss://")
         return v
+
+    @field_validator("tts_voice_path_en")
+    @classmethod
+    def _optional_voice(cls, v: str | None) -> str | None:
+        return v or None
 
     @field_validator("mcp_path")
     @classmethod
@@ -162,6 +170,8 @@ _SCALARS = {
     "STT_CPU_THREADS": "stt_cpu_threads",
     "STT_INITIAL_PROMPT": "stt_initial_prompt",
     "TTS_VOICE_PATH": "tts_voice_path",
+    "TTS_LANGUAGE": "tts_language",
+    "TTS_VOICE_PATH_EN": "tts_voice_path_en",
     "TTS_LENGTH_SCALE": "tts_length_scale",
     "LISTEN_SILENCE_MS": "listen_silence_ms",
     "LISTEN_EARLY_SILENCE_MS": "listen_early_silence_ms",

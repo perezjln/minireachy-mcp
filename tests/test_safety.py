@@ -37,6 +37,8 @@ GATED_CALLS = {
     "restart_daemon": {},
     "speak": {"text": "Bonjour"},
     "turn_toward_sound": {},
+    "look_at_point": {"x": 10, "y": 10},
+    "nudge_head": {"yaw": 0.1},
 }
 
 
