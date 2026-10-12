@@ -19,8 +19,8 @@ S = Settings()
 tts = TextToSpeech(S.tts_voice_path)
 
 PHRASES = {
-    "court (~2s)": "Bonjour Reachy, comment ça va ?",
-    "moyen (~5s)": "Je voudrais que tu me dises quelle est la couleur de mon t-shirt, s'il te plaît.",
+    "short (~2s)": "Bonjour Reachy, comment ça va ?",
+    "medium (~5s)": "Je voudrais que tu me dises quelle est la couleur de mon t-shirt, s'il te plaît.",
     "long (~9s)": "Hier soir, je suis allé au cinéma avec des amis pour voir un film de science-fiction, "
     "et j'ai trouvé l'histoire vraiment passionnante.",
 }
@@ -43,7 +43,7 @@ audios = {}
 for name, text in PHRASES.items():
     sp = tts.synthesize(text)
     audios[name] = to_16k(sp.wav)
-    print(f"TTS {name}: synthèse {sp.seconds:.2f}s pour {sp.duration_s:.2f}s d'audio")
+    print(f"TTS {name}: synthesis {sp.seconds:.2f}s for {sp.duration_s:.2f}s of audio")
 
 print(f"\nCPU visibles : {os.cpu_count()}")
 configs = [
@@ -68,7 +68,7 @@ for label, load_kw, kw in configs:
             t = time.perf_counter()
             segs, _ = model.transcribe(audio, language="fr", beam_size=1, condition_on_previous_text=False, **kw)
             list(segs)
-            line.append(f"{name}: {dt:.2f}s (à froid) / {time.perf_counter() - t:.2f}s")
+            line.append(f"{name}: {dt:.2f}s (cold) / {time.perf_counter() - t:.2f}s")
             first = False
         else:
             line.append(f"{name}: {dt:.2f}s")

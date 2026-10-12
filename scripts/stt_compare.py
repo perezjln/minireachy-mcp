@@ -69,13 +69,13 @@ async def run() -> None:
     warm = np.zeros(16000, dtype=np.float32)
     for name, model in models.items():
         transcribe(model, warm, 1)
-    print(f"modèles chargés en {time.perf_counter() - t:.1f}s", flush=True)
+    print(f"models loaded in {time.perf_counter() - t:.1f}s", flush=True)
 
     tts = TextToSpeech(S.tts_voice_path)
     link = MediaLink(S.media_signalling_url, connect_timeout_s=25)
     await link.ensure_connected()
     if link.speaker is None:
-        raise SystemExit("le flux voix n'est pas disponible")
+        raise SystemExit("voice stream is not available")
     await say(link, tts, "Test de reconnaissance vocale. Après chaque numéro, dis la phrase prévue.")
 
     rows = []
@@ -99,7 +99,7 @@ async def run() -> None:
     await say(link, tts, "Merci, le test est terminé.")
     await link.close()
 
-    print("\nRÉCAPITULATIF (phrases exactes / temps moyen)")
+    print("\nSUMMARY (exact sentences / mean time)")
     for k, (name, beam) in enumerate(CONFIGS):
         done = [r[2][1][k] for r in rows if r[2]]
         if done:
@@ -111,7 +111,7 @@ def download() -> None:
     for name in ("medium", "turbo"):
         t = time.perf_counter()
         load(name)
-        print(f"{name} prêt en {time.perf_counter() - t:.0f}s", flush=True)
+        print(f"{name} ready in {time.perf_counter() - t:.0f}s", flush=True)
 
 
 if __name__ == "__main__":

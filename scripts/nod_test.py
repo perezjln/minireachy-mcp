@@ -48,7 +48,7 @@ async def main() -> None:
             print(f"  wait: running={w['running']} timed_out={w['timed_out']}")
             await anyio.sleep(0.3)
             now = await call(c, "get_head_pose", {})
-            print(f"  pose mesurée : {pose_str(now)}  (pitch visé {pitch:+.4f}, écart {now['pitch'] - pitch:+.4f})")
+            print(f"  measured pose : {pose_str(now)}  (target pitch {pitch:+.4f}, delta {now['pitch'] - pitch:+.4f})")
 
         print("moves en cours:", (await call(c, "list_running_moves", {}))["count"])
 

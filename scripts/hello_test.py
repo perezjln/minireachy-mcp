@@ -37,10 +37,10 @@ async def main() -> None:
         state = await call(c, "get_full_state", {})
         home = {k: state["head_pose"][k] for k in POSE_KEYS}
         ant0 = state["antennas_position"]
-        print("départ  : pitch=%+.4f roll=%+.4f antennes=[%+.3f, %+.3f]" % (home["pitch"], home["roll"], *ant0))
+        print("start   : pitch=%+.4f roll=%+.4f antennas=[%+.3f, %+.3f]" % (home["pitch"], home["roll"], *ant0))
 
         tilt = {**home, "roll": home["roll"] + 0.2, "pitch": home["pitch"] - 0.1}
-        await step(c, "tête penchée", duration=0.8, head_pose=tilt, antennas=[0.6, -0.6], interpolation="ease_in_out")
+        await step(c, "head tilted", duration=0.8, head_pose=tilt, antennas=[0.6, -0.6], interpolation="ease_in_out")
         for i in (1, 2):
             await step(c, f"antennes {i}/2 (a)", duration=0.4, antennas=[-0.6, 0.6], interpolation="ease_in_out")
             await step(c, f"antennes {i}/2 (b)", duration=0.4, antennas=[0.6, -0.6], interpolation="ease_in_out")
@@ -49,8 +49,8 @@ async def main() -> None:
         await anyio.sleep(0.5)
         end = await call(c, "get_full_state", {})
         p = end["head_pose"]
-        print("arrivée : pitch=%+.4f roll=%+.4f antennes=[%+.3f, %+.3f]" % (p["pitch"], p["roll"], *end["antennas_position"]))
-        print("écart   : pitch=%+.4f roll=%+.4f" % (p["pitch"] - home["pitch"], p["roll"] - home["roll"]))
+        print("end     : pitch=%+.4f roll=%+.4f antennas=[%+.3f, %+.3f]" % (p["pitch"], p["roll"], *end["antennas_position"]))
+        print("delta   : pitch=%+.4f roll=%+.4f" % (p["pitch"] - home["pitch"], p["roll"] - home["roll"]))
 
         print("surveillance du daemon (40 s, lecture seule) :")
         t0 = time.monotonic()

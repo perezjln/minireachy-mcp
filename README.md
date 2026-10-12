@@ -1,52 +1,128 @@
 # minireachy-mcp
 
-Serveur **MCP (Model Context Protocol)** pour piloter un robot **Reachy Mini** (« MiniReachy », Hugging Face / Pollen Robotics) au travers de son **daemon natif**.
+An **[MCP (Model Context Protocol)](https://modelcontextprotocol.io)** server that lets an AI agent (Claude Code, an IDE, any MCP client) control a **[Reachy Mini](https://github.com/pollen-robotics/reachy_mini)** robot ("MiniReachy", by [Pollen Robotics](https://www.pollen-robotics.com) and [Hugging Face](https://huggingface.co/pollen-robotics)) through its **native daemon**.
 
-* Le serveur MCP tourne **dans Docker Compose**. Le daemon MiniReachy reste sur la machine hôte et n'est jamais installé dans le conteneur.
-* Le transport est **Streamable HTTP** sur `http://127.0.0.1:8765/mcp`, avec le SDK Python officiel `mcp==2.3.0` (branche v2).
-* **68 outils** couvrent les 57 opérations pertinentes de l'API du daemon (v1.8.0). 10 opérations sont exclues, chacune avec une justification. Voir [docs/inventaire-api.md](docs/inventaire-api.md).
-* **Perception et voix** : Reachy voit (caméra), écoute (micros, reconnaissance vocale locale faster-whisper) et parle (synthèse vocale locale Piper, voix française, ou anglaise avec `language="en"`). Le tout passe par le flux WebRTC du daemon, sans accès USB depuis le conteneur.
-* **Skill conversationnel** : [.claude/skills/reachy-conversation](.claude/skills/reachy-conversation/SKILL.md) transforme Reachy en agent conversationnel piloté par Claude.
-* Les actions physiques, les actions d'administration et la perception (caméra et micros) sont **refusées par défaut**.
+> **Unofficial project.** It is not affiliated with, endorsed by or supported by Pollen Robotics or Hugging Face. It talks to the public HTTP API and WebRTC stream of the Reachy Mini daemon.
+
+## Highlights
+
+* The MCP server runs **in Docker Compose**. The Reachy Mini daemon stays on the host machine and is never installed in the container.
+* The transport is **Streamable HTTP** on `http://127.0.0.1:8765/mcp`, using the official [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) `mcp==2.3.0` (v2 branch).
+* **68 tools** cover the 57 relevant operations of the daemon API (v1.8.0). 10 operations are excluded, each with a justification. See [docs/api-inventory.md](docs/api-inventory.md).
+* **Perception and voice**: Reachy sees (camera), listens (microphones, local [faster-whisper](https://github.com/SYSTRAN/faster-whisper) speech recognition) and speaks (local [Piper](https://github.com/OHF-Voice/piper1-gpl) speech synthesis, French voice, or English with `language="en"`). Everything goes through the daemon's WebRTC stream, with no USB access from the container.
+* **Conversational skill**: [.claude/skills/reachy-conversation](.claude/skills/reachy-conversation/SKILL.md) turns Reachy into a conversational agent driven by Claude.
+* Physical actions, administration actions and perception (camera and microphones) are **refused by default**.
+
+## Dependencies and useful links
+
+| Component | Used for | Link |
+|---|---|---|
+| Reachy Mini (robot, SDK and daemon) | The robot and the daemon this server controls | [github.com/pollen-robotics/reachy_mini](https://github.com/pollen-robotics/reachy_mini) |
+| Reachy Mini documentation | Setup of the robot and of the daemon / desktop app | [huggingface.co/docs/reachy_mini](https://huggingface.co/docs/reachy_mini) |
+| Pollen Robotics | Maker of Reachy Mini | [pollen-robotics.com](https://www.pollen-robotics.com), [huggingface.co/pollen-robotics](https://huggingface.co/pollen-robotics) |
+| Reachy Mini emotions library | Recorded moves played by `play_recorded_move` | [huggingface.co/datasets/pollen-robotics/reachy-mini-emotions-library](https://huggingface.co/datasets/pollen-robotics/reachy-mini-emotions-library) |
+| Hugging Face Hub | Source of the speech models downloaded at image build time | [huggingface.co](https://huggingface.co) |
+| `Systran/faster-whisper-small` | Speech-to-text model | [huggingface.co/Systran/faster-whisper-small](https://huggingface.co/Systran/faster-whisper-small) |
+| `rhasspy/piper-voices` | Text-to-speech voices (French `siwis`, English `lessac`) | [huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) |
+| faster-whisper | Local speech recognition engine | [github.com/SYSTRAN/faster-whisper](https://github.com/SYSTRAN/faster-whisper) |
+| Piper (`piper-tts`) | Local speech synthesis engine | [github.com/OHF-Voice/piper1-gpl](https://github.com/OHF-Voice/piper1-gpl) |
+| aiortc | WebRTC client for the daemon's camera / microphone stream | [github.com/aiortc/aiortc](https://github.com/aiortc/aiortc) |
+| GStreamer `webrtcsink` | WebRTC media server run by the daemon | [github.com/GStreamer/gst-plugins-rs](https://github.com/GStreamer/gst-plugins-rs) |
+| Model Context Protocol | The protocol and its Python SDK | [modelcontextprotocol.io](https://modelcontextprotocol.io), [github.com/modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk) |
+| Docker Desktop / Docker Compose | Runtime of the MCP server | [docs.docker.com/compose](https://docs.docker.com/compose/) |
+
+Python dependencies are pinned in [pyproject.toml](pyproject.toml) and in the hashed lock files `requirements.lock` / `requirements-test.lock`.
+
+## Quick start
+
+1. **Start the Reachy Mini daemon** on the host (the "Reachy Mini Control" desktop app, see the [Reachy Mini documentation](https://huggingface.co/docs/reachy_mini)) and check that the robot is connected. By default the daemon listens on port `8000`.
+2. **Configure and start the MCP server** (requires Docker with Compose v2.24+):
+
+   ```bash
+   cp .env.example .env
+   docker compose up --build -d
+   ```
+
+   The first build downloads the speech models and takes a few minutes.
+3. **Check that it works**:
+
+   ```bash
+   curl http://127.0.0.1:8765/healthz          # the MCP server
+   curl http://127.0.0.1:8765/healthz/daemon   # the MCP server can reach the Reachy Mini daemon
+   ```
+4. **Connect your MCP client** to `http://127.0.0.1:8765/mcp`. With Claude Code:
+
+   ```bash
+   claude mcp add --transport http minireachy http://127.0.0.1:8765/mcp
+   ```
+
+   Other clients: see [section 8](#8-configuring-an-mcp-client). Read-only tools (`get_daemon_status`, `get_full_state`…) work right away.
+5. **Allow the robot to act.** Everything that moves the robot or uses its camera and microphones is refused by default. To enable it, edit `.env`, then restart:
+
+   ```
+   ENABLE_PHYSICAL_ACTIONS=true   # movements, sound, speaking
+   ENABLE_PERCEPTION=true         # camera and microphones
+   ```
+
+   ```bash
+   docker compose up -d
+   ```
+
+   `get_server_safety_config` tells you which switches are currently on.
+
+### Using the MCP server
+
+Ask your MCP client in natural language ("what is Reachy's state?", "nod your head", "take a picture"). The client picks the right tools; the full list is in [section 9](#9-available-tools). Every tool returns structured JSON, and a refused action comes back as `refused_by_safety_policy` with the switch to turn on.
+
+### Using the conversation skill (Claude Code)
+
+The skill [`reachy-conversation`](.claude/skills/reachy-conversation/SKILL.md) turns Reachy into a spoken conversational agent: Reachy listens, optionally looks through its camera, and answers aloud with gestures, with Claude as the brain.
+
+1. Complete the quick start above, with **both** `ENABLE_PHYSICAL_ACTIONS=true` and `ENABLE_PERCEPTION=true`.
+2. Open Claude Code **in this repository folder**. The project's `.mcp.json` declares the `minireachy` server and the skill is picked up from `.claude/skills/`. Approve the project MCP server when asked, and make sure it is connected (the server must be running *before* you start Claude Code, or reconnect it with `/mcp`).
+3. Start the conversation with `/reachy-conversation`, or just say "talk with Reachy". Say "stop" to freeze the robot and "au revoir Reachy" (or "goodbye") to end.
+4. Reachy speaks French by default. Switch to English by asking for it: the skill then passes `language="en"`.
+
+To use the skill from another project, copy `.claude/skills/reachy-conversation` into that project's `.claude/skills/` (or into `~/.claude/skills/` for all your projects) and register the MCP server as shown in step 4 above. Expect about 4 to 10 s of latency per exchange. More detail in [Perception, voice and conversational agent](#perception-voice-and-conversational-agent).
 
 ---
 
 ## 1. Architecture
 
 ```
- Client MCP (Claude Code, IDE, agent…)
-        │  Streamable HTTP  http://127.0.0.1:8765/mcp   (publié sur la boucle locale uniquement)
+ MCP client (Claude Code, IDE, agent…)
+        │  Streamable HTTP  http://127.0.0.1:8765/mcp   (published on the loopback interface only)
         ▼
-┌──────────────── conteneur minireachy-mcp (Docker Compose) ────────────────┐
-│ server.py   MCPServer + /healthz + auth Bearer optionnelle + anti DNS-rebinding │
-│ tools/      outils par domaine : daemon, state, motion, media, apps            │
-│ safety.py   portes ENABLE_PHYSICAL_ACTIONS / ENABLE_ADMIN_ACTIONS + garde-fous  │
-│ client.py   client httpx unique : délais, taille max, relance GET uniquement    │
+┌──────────────── minireachy-mcp container (Docker Compose) ────────────────┐
+│ server.py   MCPServer + /healthz + optional Bearer auth + DNS-rebinding guard │
+│ tools/      tools by domain: daemon, state, motion, media, apps                │
+│ safety.py   ENABLE_PHYSICAL_ACTIONS / ENABLE_ADMIN_ACTIONS gates + guardrails │
+│ client.py   single httpx client: timeouts, max size, GET-only retries          │
 └────────────────────────────────────────────────────────────────────────────┘
-        │  HTTP  MINIREACHY_BASE_URL (par défaut http://host.docker.internal:8000)
+        │  HTTP  MINIREACHY_BASE_URL (default http://host.docker.internal:8000)
         ▼
- Daemon Reachy Mini (natif, sur l'hôte) ── USB ── robot
+ Reachy Mini daemon (native, on the host) ── USB ── robot
 ```
 
-| Fichier | Rôle |
+| File | Role |
 |---|---|
-| `src/minireachy_mcp/config.py` | Variables d'environnement, validation, valeurs par défaut sûres |
-| `src/minireachy_mcp/client.py` | Client HTTP du daemon (timeouts, erreurs, taille des réponses, corrélation) |
-| `src/minireachy_mcp/errors.py` | Erreurs typées, rédigées pour être exploitables par un LLM |
-| `src/minireachy_mcp/models.py` | Modèles d'entrée reflétant les schémas OpenAPI |
-| `src/minireachy_mcp/safety.py` | Classes de risque, portes de sécurité, garde-fous de mouvement |
-| `src/minireachy_mcp/tools/` | Outils MCP par domaine |
-| `src/minireachy_mcp/inventory.py` | Endpoints exclus et leur justification |
-| `src/minireachy_mcp/diagnostics.py`, `diagnose.py` | Diagnostic réseau en 4 étapes, détection d'écart OpenAPI |
-| `src/minireachy_mcp/server.py`, `__main__.py` | Assemblage du serveur, application HTTP, arrêt propre |
-| `tests/` | Tests unitaires, intégration avec un daemon simulé, protocole MCP, e2e |
-| `docs/api/openapi.json` | Instantané du schéma OpenAPI du daemon (référence des tests) |
+| `src/minireachy_mcp/config.py` | Environment variables, validation, safe defaults |
+| `src/minireachy_mcp/client.py` | Daemon HTTP client (timeouts, errors, response size, correlation) |
+| `src/minireachy_mcp/errors.py` | Typed errors, written to be usable by an LLM |
+| `src/minireachy_mcp/models.py` | Input models mirroring the OpenAPI schemas |
+| `src/minireachy_mcp/safety.py` | Risk classes, safety gates, motion guardrails |
+| `src/minireachy_mcp/tools/` | MCP tools by domain |
+| `src/minireachy_mcp/inventory.py` | Excluded endpoints and their justification |
+| `src/minireachy_mcp/diagnostics.py`, `diagnose.py` | 4-step network diagnostic, OpenAPI drift detection |
+| `src/minireachy_mcp/server.py`, `__main__.py` | Server assembly, HTTP application, graceful shutdown |
+| `tests/` | Unit tests, integration with a simulated daemon, MCP protocol, e2e |
+| `docs/api/openapi.json` | Snapshot of the daemon's OpenAPI schema (test reference) |
 
-## 2. Prérequis
+## 2. Prerequisites
 
-* Docker Engine avec Docker Compose v2.24 ou plus récent. Validé avec Docker Desktop (Windows 11), Docker 29.8.2 et Compose v5.5.1.
-* Le daemon Reachy Mini (application « Reachy Mini Control ») lancé sur l'hôte. Validé avec la version 1.8.0, sur un Reachy Mini Lite en USB.
-* Aucun Python n'est nécessaire sur l'hôte : la construction, les tests et le diagnostic passent par Docker.
+* Docker Engine with Docker Compose v2.24 or newer. Validated with Docker Desktop (Windows 11), Docker 29.8.2 and Compose v5.5.1.
+* The Reachy Mini daemon ("Reachy Mini Control" application) running on the host. Validated with version 1.8.0, on a Reachy Mini Lite over USB.
+* No Python is needed on the host: build, tests and diagnostics all go through Docker.
 
 ## 3. Configuration
 
@@ -54,29 +130,29 @@ Serveur **MCP (Model Context Protocol)** pour piloter un robot **Reachy Mini** (
 cp .env.example .env
 ```
 
-Toutes les variables sont documentées dans [.env.example](.env.example). Les principales :
+All variables are documented in [.env.example](.env.example). The main ones:
 
-| Variable | Défaut | Rôle |
+| Variable | Default | Role |
 |---|---|---|
-| `MINIREACHY_BASE_URL` | `http://host.docker.internal:8000` | URL du daemon **vue depuis le conteneur** |
-| `MINIREACHY_CONNECT_TIMEOUT` / `MINIREACHY_READ_TIMEOUT` | `3` / `15` s | Délais HTTP |
-| `MINIREACHY_GET_RETRIES` | `1` | Relances, pour les lectures (GET) uniquement |
-| `MINIREACHY_MAX_RESPONSE_BYTES` | `2000000` | Au-delà de cette taille, la réponse est rejetée |
-| `MCP_PUBLISH_PORT` | `8765` | Port publié sur `127.0.0.1` de l'hôte |
-| `MCP_PATH` | `/mcp` | Chemin de l'endpoint MCP |
-| `MCP_AUTH_TOKEN` | vide | Jeton Bearer (24 caractères minimum). Vide = pas d'authentification |
-| `MCP_ALLOWED_HOSTS` | loopback + `minireachy-mcp:*` | En-têtes `Host` acceptés (protection DNS rebinding) |
-| `ENABLE_PHYSICAL_ACTIONS` | `false` | Autorise mouvements, couple moteur, son et démarrage d'apps |
-| `ENABLE_ADMIN_ACTIONS` | `false` | Autorise le cycle de vie du daemon, l'installation d'apps, la libération des médias et le DSP audio |
-| `ENABLE_PERCEPTION` | `false` | Autorise la caméra (`capture_image`) et l'écoute (`listen`) |
-| `MEDIA_SIGNALLING_URL` | `ws://host.docker.internal:8443` | Signalisation WebRTC du serveur média du daemon |
-| `STT_LANGUAGE`, `STT_BEAM_SIZE`, `TTS_LENGTH_SCALE` | `fr`, `1`, `1.0` | Langue et réglages de la reconnaissance et de la synthèse vocales |
-| `TTS_VOICE_PATH_EN` | voix `en_US-lessac-medium` | Voix anglaise, utilisée quand `speak`/`converse` reçoivent `language="en"`. Vide = désactivée |
-| `LIMIT_*` | voir `.env.example` | Garde-fous de `goto_pose`, propres au serveur MCP |
+| `MINIREACHY_BASE_URL` | `http://host.docker.internal:8000` | Daemon URL **as seen from the container** |
+| `MINIREACHY_CONNECT_TIMEOUT` / `MINIREACHY_READ_TIMEOUT` | `3` / `15` s | HTTP timeouts |
+| `MINIREACHY_GET_RETRIES` | `1` | Retries, for reads (GET) only |
+| `MINIREACHY_MAX_RESPONSE_BYTES` | `2000000` | Responses larger than this are rejected |
+| `MCP_PUBLISH_PORT` | `8765` | Port published on the host's `127.0.0.1` |
+| `MCP_PATH` | `/mcp` | MCP endpoint path |
+| `MCP_AUTH_TOKEN` | empty | Bearer token (24 characters minimum). Empty = no authentication |
+| `MCP_ALLOWED_HOSTS` | loopback + `minireachy-mcp:*` | Accepted `Host` headers (DNS-rebinding protection) |
+| `ENABLE_PHYSICAL_ACTIONS` | `false` | Allows movements, motor torque, sound and app starts |
+| `ENABLE_ADMIN_ACTIONS` | `false` | Allows daemon lifecycle, app installation, media release and audio DSP |
+| `ENABLE_PERCEPTION` | `false` | Allows the camera (`capture_image`) and listening (`listen`) |
+| `MEDIA_SIGNALLING_URL` | `ws://host.docker.internal:8443` | WebRTC signalling of the daemon's media server |
+| `STT_LANGUAGE`, `STT_BEAM_SIZE`, `TTS_LENGTH_SCALE` | `fr`, `1`, `1.0` | Language and settings of speech recognition and synthesis |
+| `TTS_VOICE_PATH_EN` | `en_US-lessac-medium` voice | English voice, used when `speak`/`converse` receive `language="en"`. Empty = disabled |
+| `LIMIT_*` | see `.env.example` | `goto_pose` guardrails, specific to the MCP server |
 
-Aucun secret ne figure dans l'image ni dans le dépôt : `.env` est ignoré par git et par le contexte de build Docker.
+No secret is present in the image or in the repository: `.env` is ignored by git and by the Docker build context.
 
-## 4. Lancement
+## 4. Running
 
 ```bash
 docker compose up --build -d
@@ -90,105 +166,105 @@ docker compose ps
 docker compose logs -f minireachy-mcp
 ```
 
-L'état `healthy` ne concerne **que le serveur MCP**. Si le daemon est arrêté, le conteneur reste sain et ne redémarre pas en boucle. Ce comportement a été vérifié : avec un daemon injoignable, le conteneur reste `healthy` et `RestartCount=0`. Les outils, eux, renvoient alors `daemon_unreachable`.
+The `healthy` state applies to **the MCP server only**. If the daemon is stopped, the container stays healthy and does not restart in a loop. This behavior was verified: with an unreachable daemon, the container stays `healthy` with `RestartCount=0`. The tools then return `daemon_unreachable`.
 
-Pour autoriser les actions physiques, l'opérateur modifie `.env` :
+To allow physical actions, the operator edits `.env`:
 
 ```
 ENABLE_PHYSICAL_ACTIONS=true
 ```
 
-puis relance :
+then restarts:
 
 ```bash
 docker compose up -d
 ```
 
-## 5. Réseau selon le système hôte
+## 5. Networking by host system
 
-Le daemon tourne sur l'hôte et le serveur MCP dans un conteneur. Il faut donc distinguer :
+The daemon runs on the host and the MCP server in a container. The two points of view must therefore be distinguished:
 
-| Point de vue | Daemon | Serveur MCP |
+| Point of view | Daemon | MCP server |
 |---|---|---|
-| Hôte | `http://localhost:8000` | `http://127.0.0.1:8765/mcp` |
-| Conteneur | `http://host.docker.internal:8000` | écoute sur `0.0.0.0:8765` (interne au conteneur) |
-| Autre conteneur Compose | `http://host.docker.internal:8000` | `http://minireachy-mcp:8765/mcp` |
+| Host | `http://localhost:8000` | `http://127.0.0.1:8765/mcp` |
+| Container | `http://host.docker.internal:8000` | listens on `0.0.0.0:8765` (internal to the container) |
+| Other Compose container | `http://host.docker.internal:8000` | `http://minireachy-mcp:8765/mcp` |
 
-**Windows et macOS (Docker Desktop)** : `host.docker.internal` est fourni par Docker Desktop. Ce cas a été vérifié sous Windows : le nom se résout en `192.168.65.254` et le daemon répond.
+**Windows and macOS (Docker Desktop)**: `host.docker.internal` is provided by Docker Desktop. This case was verified on Windows: the name resolves to `192.168.65.254` and the daemon responds.
 
-**Linux** : `compose.yaml` déclare `extra_hosts: host.docker.internal:host-gateway`, qui fait pointer ce nom vers la passerelle de l'hôte. Attention, ce n'est **pas suffisant** si le daemon n'écoute que sur `127.0.0.1` : la passerelle Docker n'atteint pas la boucle locale de l'hôte. Solutions possibles, de la plus restrictive à la moins restrictive :
+**Linux**: `compose.yaml` declares `extra_hosts: host.docker.internal:host-gateway`, which points this name to the host's gateway. Note that this is **not enough** if the daemon only listens on `127.0.0.1`: the Docker gateway cannot reach the host's loopback interface. Possible solutions, from the most to the least restrictive:
 
-1. Un relais TCP sur l'hôte, limité à l'interface du pont Docker. Par exemple :
+1. A TCP relay on the host, limited to the Docker bridge interface. For example:
    ```bash
    socat TCP-LISTEN:8000,bind=172.17.0.1,reuseaddr,fork TCP:127.0.0.1:8000
    ```
-   Il faut ensuite vérifier l'IP réelle du pont (`ip addr show docker0`) et le pare-feu.
-2. Faire écouter le daemon sur l'interface du pont Docker, avec un pare-feu qui n'autorise que les sous-réseaux Docker.
-3. `MINIREACHY_BASE_URL` pointant vers une autre IP de l'hôte, filtrée par le pare-feu.
+   You then need to check the real bridge IP (`ip addr show docker0`) and the firewall.
+2. Make the daemon listen on the Docker bridge interface, with a firewall that only allows the Docker subnets.
+3. `MINIREACHY_BASE_URL` pointing to another host IP, filtered by the firewall.
 
-Le mode `network_mode: host` n'est volontairement pas utilisé. **Le cas Linux n'a pas été testé dans cet environnement.**
+`network_mode: host` is deliberately not used. **The Linux case was not tested in this environment.**
 
-**Observation de sécurité sur l'hôte de développement** : le daemon v1.8.0 écoute sur `0.0.0.0:8000`, donc sur toutes les interfaces, sans authentification. Il est joignable depuis le réseau local, indépendamment de ce projet. Je n'ai pas modifié sa configuration. Il est conseillé de restreindre le port 8000 par le pare-feu de l'hôte (par exemple, sous Windows, autoriser seulement `127.0.0.1` et le sous-réseau Docker Desktop).
+**Security observation on the development host**: daemon v1.8.0 listens on `0.0.0.0:8000`, so on all interfaces, without authentication. It is reachable from the local network, independently of this project. Its configuration was not modified. It is advisable to restrict port 8000 with the host firewall (for example, on Windows, allow only `127.0.0.1` and the Docker Desktop subnet).
 
-## 6. Vérifier la connectivité vers MiniReachy
+## 6. Checking connectivity to MiniReachy
 
-Depuis le conteneur, quatre étapes distinctes sont vérifiées : résolution DNS, port TCP, réponse HTTP, puis état fonctionnel du daemon.
+From the container, four distinct steps are checked: DNS resolution, TCP port, HTTP response, then the functional state of the daemon.
 
 ```bash
 docker compose exec minireachy-mcp python -m minireachy_mcp.diagnose
 ```
 
-Pour ajouter la comparaison entre l'OpenAPI en ligne et l'inventaire des outils :
+To add the comparison between the live OpenAPI and the tool inventory:
 
 ```bash
 docker compose exec minireachy-mcp python -m minireachy_mcp.diagnose --drift
 ```
 
-Santé du serveur MCP seul :
+Health of the MCP server alone:
 
 ```bash
 curl http://127.0.0.1:8765/healthz
 ```
 
-Joignabilité du daemon (répond 503 si le daemon est injoignable ou n'est pas `running`) :
+Daemon reachability (answers 503 if the daemon is unreachable or not `running`):
 
 ```bash
 curl http://127.0.0.1:8765/healthz/daemon
 ```
 
-Le même diagnostic existe sous forme d'outil MCP : `diagnose_connectivity`. Une étape `daemon_status` OK signifie seulement que le daemon déclare l'état `running`. Cela ne prouve pas que le matériel du robot est en bon état.
+The same diagnostic exists as an MCP tool: `diagnose_connectivity`. A successful `daemon_status` step only means that the daemon reports the `running` state. It does not prove that the robot hardware is in good condition.
 
-## 7. Adresse et transport MCP
+## 7. MCP address and transport
 
-* Transport : **Streamable HTTP** (SDK `mcp` 2.3.0, sessions avec état, réponses SSE).
-* URL : `http://127.0.0.1:8765/mcp`, publiée **uniquement sur la boucle locale** de l'hôte.
-* Protection DNS rebinding active : seuls les en-têtes `Host` listés dans `MCP_ALLOWED_HOSTS` sont acceptés.
-* Authentification Bearer optionnelle avec `MCP_AUTH_TOKEN`. Les routes `/healthz*` n'en ont pas besoin.
+* Transport: **Streamable HTTP** (`mcp` SDK 2.3.0, stateful sessions, SSE responses).
+* URL: `http://127.0.0.1:8765/mcp`, published **on the host's loopback interface only**.
+* DNS-rebinding protection is active: only the `Host` headers listed in `MCP_ALLOWED_HOSTS` are accepted.
+* Optional Bearer authentication with `MCP_AUTH_TOKEN`. The `/healthz*` routes do not need it.
 
-**Accès depuis une autre machine** (non configuré par défaut) :
+**Access from another machine** (not configured by default):
 
-1. Définir `MCP_AUTH_TOKEN`.
-2. Placer un reverse proxy TLS (Caddy, Traefik, nginx) devant le service.
-3. Ajouter le nom d'hôte public à `MCP_ALLOWED_HOSTS`.
-4. Restreindre les adresses sources au pare-feu.
+1. Set `MCP_AUTH_TOKEN`.
+2. Put a TLS reverse proxy (Caddy, Traefik, nginx) in front of the service.
+3. Add the public host name to `MCP_ALLOWED_HOSTS`.
+4. Restrict source addresses at the firewall.
 
-Ne publiez jamais `0.0.0.0:8765` sans ces protections. Le jeton est statique : il n'y a ni OAuth ni rotation automatique.
+Never publish `0.0.0.0:8765` without these protections. The token is static: there is no OAuth and no automatic rotation.
 
-## 8. Configurer un client MCP
+## 8. Configuring an MCP client
 
-**Claude Code** :
+**Claude Code**:
 
 ```bash
 claude mcp add --transport http minireachy http://127.0.0.1:8765/mcp
 ```
 
-Avec un jeton :
+With a token:
 
 ```bash
-claude mcp add --transport http minireachy http://127.0.0.1:8765/mcp --header "Authorization: Bearer VOTRE_JETON"
+claude mcp add --transport http minireachy http://127.0.0.1:8765/mcp --header "Authorization: Bearer YOUR_TOKEN"
 ```
 
-**Client générique** (fichier `.mcp.json`, Cursor, VS Code…) :
+**Generic client** (`.mcp.json` file, Cursor, VS Code…):
 
 ```json
 {
@@ -196,163 +272,163 @@ claude mcp add --transport http minireachy http://127.0.0.1:8765/mcp --header "A
     "minireachy": {
       "type": "http",
       "url": "http://127.0.0.1:8765/mcp",
-      "headers": { "Authorization": "Bearer VOTRE_JETON" }
+      "headers": { "Authorization": "Bearer YOUR_TOKEN" }
     }
   }
 }
 ```
 
-Supprimez `headers` si `MCP_AUTH_TOKEN` est vide. Les commandes de configuration de ces clients n'ont pas été exécutées dans cet environnement. La découverte et l'appel des outils ont en revanche été validés avec le client MCP officiel du SDK, en HTTP, depuis un conteneur (`tests/test_e2e.py`).
+Remove `headers` if `MCP_AUTH_TOKEN` is empty. The configuration commands of these clients were not run in this environment. Tool discovery and calls, however, were validated with the official SDK MCP client, over HTTP, from a container (`tests/test_e2e.py`).
 
-## 9. Outils disponibles
+## 9. Available tools
 
-Tous les outils renvoient du JSON structuré (`structuredContent`). Les erreurs sont renvoyées avec `isError=true` et un code explicite : `refused_by_safety_policy`, `daemon_unreachable`, `uncertain_outcome`, `daemon_validation_error`, `daemon_http_error`, `invalid_response`, `response_too_large`. Le détail endpoint par endpoint se trouve dans [docs/inventaire-api.md](docs/inventaire-api.md).
+All tools return structured JSON (`structuredContent`). Errors are returned with `isError=true` and an explicit code: `refused_by_safety_policy`, `daemon_unreachable`, `uncertain_outcome`, `daemon_validation_error`, `daemon_http_error`, `invalid_response`, `response_too_large`. The endpoint-by-endpoint detail is in [docs/api-inventory.md](docs/api-inventory.md).
 
-**Lecture et diagnostic (toujours disponibles, sans effet de bord)** :
+**Read and diagnostics (always available, no side effects)**:
 
-| Domaine | Outils |
+| Domain | Tools |
 |---|---|
 | Daemon | `get_daemon_status`, `get_hardware_id`, `get_robot_app_lock_status`, `diagnose_connectivity`, `get_server_safety_config` |
-| État | `get_full_state`, `get_head_pose`, `get_body_yaw`, `get_antenna_positions`, `get_direction_of_arrival`, `get_motor_status` |
-| Mouvements | `list_running_moves`, `get_move_status`, `wait_for_move`, `list_recorded_moves` |
-| Caméra, cinématique | `get_camera_specs`, `get_kinematics_info`, `get_urdf` (tronqué par défaut) |
-| Médias, audio | `get_media_status`, `list_uploaded_sounds`, `get_volume`, `get_microphone_volume`, `read_audio_parameter` |
-| Apps | `list_apps` (forme compacte, filtre), `get_current_app_status`, `check_app_updates`, `get_app_job_status` |
+| State | `get_full_state`, `get_head_pose`, `get_body_yaw`, `get_antenna_positions`, `get_direction_of_arrival`, `get_motor_status` |
+| Moves | `list_running_moves`, `get_move_status`, `wait_for_move`, `list_recorded_moves` |
+| Camera, kinematics | `get_camera_specs`, `get_kinematics_info`, `get_urdf` (truncated by default) |
+| Media, audio | `get_media_status`, `list_uploaded_sounds`, `get_volume`, `get_microphone_volume`, `read_audio_parameter` |
+| Apps | `list_apps` (compact form, filter), `get_current_app_status`, `check_app_updates`, `get_app_job_status` |
 | Hugging Face | `get_hf_auth_status`, `get_relay_status`, `get_central_robot_status` |
 
-**Arrêts (toujours autorisés)** : `stop_move`, `stop_all_moves`, `stop_sound`, `stop_current_app`.
+**Stops (always allowed)**: `stop_move`, `stop_all_moves`, `stop_sound`, `stop_current_app`.
 
-**Configuration non physique (autorisée)** : `set_microphone_volume`, `upload_sound` (base64, taille limitée, extensions audio uniquement), `delete_uploaded_sound`, `refresh_relay`.
+**Non-physical configuration (allowed)**: `set_microphone_volume`, `upload_sound` (base64, size-limited, audio extensions only), `delete_uploaded_sound`, `refresh_relay`.
 
-**Physiques (`ENABLE_PHYSICAL_ACTIONS=true`)** :
+**Physical (`ENABLE_PHYSICAL_ACTIONS=true`)**:
 
-| Outil | Effet |
+| Tool | Effect |
 |---|---|
-| `goto_pose` | Mouvement de la tête, des antennes et/ou du corps, interpolé sur `duration`. Soumis aux garde-fous |
-| `wake_up` / `goto_sleep` | Mouvements intégrés de réveil et de mise en veille |
-| `play_recorded_move` | Joue un mouvement enregistré (émotions, danses…) |
-| `set_motor_mode` | `enabled` / `disabled` (plus de couple) / `gravity_compensation`, avec relecture pour confirmer |
-| `play_sound`, `play_test_sound`, `set_volume` | Son sur le haut-parleur. `set_volume` joue aussi un son de test |
-| `enable_wobbling` / `disable_wobbling` | Oscillations de la tête réactives à l'audio |
-| `start_app`, `restart_current_app` | Les apps pilotent le robot en dehors des garde-fous de ce serveur |
+| `goto_pose` | Movement of the head, antennas and/or body, interpolated over `duration`. Subject to the guardrails |
+| `wake_up` / `goto_sleep` | Built-in wake-up and sleep movements |
+| `play_recorded_move` | Plays a recorded move (emotions, dances…) |
+| `set_motor_mode` | `enabled` / `disabled` (no torque) / `gravity_compensation`, with a read-back to confirm |
+| `play_sound`, `play_test_sound`, `set_volume` | Sound on the speaker. `set_volume` also plays a test sound |
+| `enable_wobbling` / `disable_wobbling` | Head oscillations reacting to audio |
+| `start_app`, `restart_current_app` | Apps drive the robot outside this server's guardrails |
 
-**Administration (`ENABLE_ADMIN_ACTIONS=true`)** : `install_app`, `install_private_space`, `remove_app`, `update_app`, `release_media`, `acquire_media`, `apply_audio_config`.
+**Administration (`ENABLE_ADMIN_ACTIONS=true`)**: `install_app`, `install_private_space`, `remove_app`, `update_app`, `release_media`, `acquire_media`, `apply_audio_config`.
 
-**Physique + administration (les deux interrupteurs sont nécessaires)** : `start_daemon`, `stop_daemon`, `restart_daemon`.
+**Physical + administration (both switches are required)**: `start_daemon`, `stop_daemon`, `restart_daemon`.
 
-**Perception et voix** :
+**Perception and voice**:
 
-| Outil | Interrupteur | Effet |
+| Tool | Switch | Effect |
 |---|---|---|
-| `get_perception_status` | aucun (lecture) | État du flux WebRTC (images et audio reçus) et des modèles vocaux. N'ouvre pas le flux |
-| `capture_image` | `ENABLE_PERCEPTION` | Photo JPEG de la caméra de la tête (ce que voit Reachy), redimensionnable |
-| `listen` | `ENABLE_PERCEPTION` | Attend qu'on parle, enregistre jusqu'à une pause et transcrit (faster-whisper local). Ignore les bruits et la fin de sa propre voix, et renvoie la direction de la voix |
-| `converse` | `ENABLE_PERCEPTION` (+ `ENABLE_PHYSICAL_ACTIONS` pour parler et bouger) | **Un tour de conversation en un seul appel** : dit une phrase en bougeant (geste d'antennes `salut`/`joie`/`curiosite`, geste de tête `oui`/`non`, tête tournée vers un point de la dernière image avec `look_at_point` ou d'un angle relatif avec `head_turn`), écoute la réponse et la transcrit. Avec `look="auto"` (défaut), une photo est jointe seulement si la réponse demande de regarder (« regarde », « tu vois », « écrit », « see »…). Renvoie les temps mesurés |
-| `look_at_point` | `ENABLE_PHYSICAL_ACTIONS` | Tourne la tête pour amener au centre le pixel (x, y) de la dernière image renvoyée. Calcul à partir des intrinsèques de la caméra (`/api/camera/specs`) et de la pose de la tête mémorisée au moment de la photo |
-| `nudge_head` | `ENABLE_PHYSICAL_ACTIONS` | Tourne la tête d'un petit angle relatif (« un peu à droite ») et la redresse |
-| `speak` | `ENABLE_PHYSICAL_ACTIONS` | Synthèse vocale locale (Piper), envoyée en continu sur la connexion WebRTC (repli : upload puis `play_sound`). Rend la main à la fin de la lecture |
-| `turn_toward_sound` | `ENABLE_PHYSICAL_ACTIONS` | Tourne la tête (lacet) vers la direction de la dernière voix détectée |
+| `get_perception_status` | none (read) | State of the WebRTC stream (frames and audio received) and of the voice models. Does not open the stream |
+| `capture_image` | `ENABLE_PERCEPTION` | JPEG photo from the head camera (what Reachy sees), resizable |
+| `listen` | `ENABLE_PERCEPTION` | Waits for someone to speak, records until a pause and transcribes (local faster-whisper). Ignores noise and the tail of its own voice, and returns the direction of the voice |
+| `converse` | `ENABLE_PERCEPTION` (+ `ENABLE_PHYSICAL_ACTIONS` to speak and move) | **One conversation turn in a single call**: says a sentence while moving (antenna gesture `salut`/`joie`/`curiosite`, head gesture `oui`/`non`, head turned toward a point of the last image with `look_at_point` or by a relative angle with `head_turn`), listens to the answer and transcribes it. With `look="auto"` (default), a photo is attached only if the answer asks to look ("regarde", "tu vois", "écrit", "see"…). Returns the measured timings |
+| `look_at_point` | `ENABLE_PHYSICAL_ACTIONS` | Turns the head to bring the pixel (x, y) of the last returned image to the center. Computed from the camera intrinsics (`/api/camera/specs`) and the head pose stored when the photo was taken |
+| `nudge_head` | `ENABLE_PHYSICAL_ACTIONS` | Turns the head by a small relative angle ("a bit to the right") and straightens it |
+| `speak` | `ENABLE_PHYSICAL_ACTIONS` | Local speech synthesis (Piper), streamed over the WebRTC connection (fallback: upload then `play_sound`). Returns when playback is finished |
+| `turn_toward_sound` | `ENABLE_PHYSICAL_ACTIONS` | Turns the head (yaw) toward the direction of the last detected voice |
 
-## Perception, voix et agent conversationnel
+## Perception, voice and conversational agent
 
-### Fonctionnement
+### How it works
 
-Le daemon exécute un serveur média GStreamer (`webrtcsink`) qui diffuse la caméra et les micros en WebRTC. Son serveur de signalisation tourne sur le port `8443` de l'hôte. Ce flux n'est **pas** dans l'OpenAPI : je l'ai identifié dans le code du daemon (`reachy_mini/media/media_server.py`). C'est le canal officiel utilisé par le SDK distant et les navigateurs.
+The daemon runs a GStreamer media server (`webrtcsink`) that broadcasts the camera and the microphones over WebRTC. Its signalling server runs on port `8443` of the host. This stream is **not** in the OpenAPI: it was identified in the daemon code (`reachy_mini/media/media_server.py`). It is the official channel used by the remote SDK and by browsers.
 
-Le serveur MCP s'y connecte comme un client ordinaire (bibliothèque aiortc), à la demande : au premier `capture_image` ou `listen`, en environ 3 s. Il se reconnecte automatiquement si le daemon redémarre. Le conteneur n'accède donc jamais directement à l'USB.
+The MCP server connects to it as an ordinary client (aiortc library), on demand: at the first `capture_image` or `listen`, in about 3 s. It reconnects automatically if the daemon restarts. The container therefore never accesses USB directly.
 
 ```
-micros/caméra ─ daemon (hôte) ─ WebRTC :8443 ─▶ conteneur : aiortc ─▶ image JPEG / audio 16 kHz ─▶ faster-whisper ─▶ texte
-haut-parleur  ◀─ daemon (pipeline de lecture permanent) ◀─ WebRTC (Opus) ◀─ conteneur : Piper, phrase par phrase ◀─ texte
+mics/camera ─ daemon (host) ─ WebRTC :8443 ─▶ container: aiortc ─▶ JPEG image / 16 kHz audio ─▶ faster-whisper ─▶ text
+speaker     ◀─ daemon (permanent playback pipeline) ◀─ WebRTC (Opus) ◀─ container: Piper, sentence by sentence ◀─ text
 ```
 
-La voix de Reachy passe **par la même connexion WebRTC**, dans l'autre sens. Le serveur média du daemon rend sa piste audio bidirectionnelle et joue ce que le client envoie, via un pipeline de lecture créé une seule fois (avec l'analyse des oscillations de tête). Par rapport à l'ancien chemin (upload puis `play_sound`), cela supprime environ 1 s par phrase : le daemon y reconstruisait un pipeline GStreamer à chaque son, en bloquant sa boucle d'événements. Cela permet aussi de commencer à parler pendant que les phrases suivantes sont encore synthétisées, et de savoir précisément quand la lecture se termine. Si la connexion n'est pas disponible, le serveur revient automatiquement à `play_sound` (le champ `output` indique le chemin utilisé ; réglage `SPEECH_OUTPUT`).
+Reachy's voice goes **over the same WebRTC connection**, in the other direction. The daemon's media server makes its audio track bidirectional and plays what the client sends, through a playback pipeline created only once (with head-oscillation analysis). Compared with the former path (upload then `play_sound`), this removes about 1 s per sentence: the daemon rebuilt a GStreamer pipeline for every sound, blocking its event loop. It also makes it possible to start speaking while the following sentences are still being synthesized, and to know exactly when playback ends. If the connection is not available, the server automatically falls back to `play_sound` (the `output` field tells which path was used; `SPEECH_OUTPUT` setting).
 
-Les modèles (`Systran/faster-whisper-small` et `rhasspy/piper-voices`, révisions épinglées) sont **téléchargés à la construction de l'image** et intégrés à l'image (environ 610 Mo). À l'exécution, rien n'est téléchargé et aucun audio ni aucune image ne sort de la machine.
+The models (`Systran/faster-whisper-small` and `rhasspy/piper-voices`, pinned revisions) are **downloaded when the image is built** and embedded in the image (about 610 MB). At runtime, nothing is downloaded and no audio or image leaves the machine.
 
-**Deux voix** : française (`fr_FR-siwis-medium`, par défaut) et anglaise (`en_US-lessac-medium`). `speak` et `converse` prennent un paramètre `language` (`"en"` pour l'anglais). Dans `converse`, il choisit aussi la langue de la reconnaissance vocale. Les deux voix sont chargées par le préchauffage au démarrage : changer de langue en cours de conversation ne coûte rien (simple choix dans une table, pas de chargement). Une langue sans voix installée retombe sur la voix française (le champ `voice` du résultat l'indique).
+**Two voices**: French (`fr_FR-siwis-medium`, default) and English (`en_US-lessac-medium`). `speak` and `converse` take a `language` parameter (`"en"` for English). In `converse`, it also selects the speech recognition language. Both voices are loaded by the startup warm-up: switching language during a conversation costs nothing (a simple table lookup, no loading). A language without an installed voice falls back to the French voice (the `voice` field of the result says so).
 
-Performances mesurées sur cet hôte (CPU, Docker Desktop) :
+Performance measured on this host (CPU, Docker Desktop):
 
-| Étape | Avant optimisation | Maintenant |
+| Step | Before optimization | Now |
 |---|---|---|
-| Début de la voix après l'appel | ~1,1 s (synthèse + `play_sound`) | **0,03 s** (WebRTC, phrase par phrase) |
-| Temps ajouté au-delà de la durée de la phrase | +1,7 s | **+0,3 s** |
-| Fin de la phrase de l'interlocuteur → texte | ~3,1 s | **1,0 à 1,25 s** (transcription spéculative dès 300 ms de silence) |
-| Premier appel (chargement des modèles, connexion) | +3 à 5 s | **0** (préchauffage au démarrage) |
-| Appels d'outils par tour de conversation | 2 à 5 | **1** (`converse`) |
-| Tour complet mesuré (parler + écouter la réponse) | 12,5 à 14,6 s | **7,75 s** |
+| Voice start after the call | ~1.1 s (synthesis + `play_sound`) | **0.03 s** (WebRTC, sentence by sentence) |
+| Time added beyond the sentence duration | +1.7 s | **+0.3 s** |
+| End of the speaker's sentence → text | ~3.1 s | **1.0 to 1.25 s** (speculative transcription after 300 ms of silence) |
+| First call (model loading, connection) | +3 to 5 s | **0** (startup warm-up) |
+| Tool calls per conversation turn | 2 to 5 | **1** (`converse`) |
+| Measured full turn (speak + listen to the answer) | 12.5 to 14.6 s | **7.75 s** |
 
-### Activer
+### Enabling
 
-Dans `.env` :
+In `.env`:
 
 ```
 ENABLE_PHYSICAL_ACTIONS=true
 ENABLE_PERCEPTION=true
 ```
 
-puis :
+then:
 
 ```bash
 docker compose up --build -d
 ```
 
-Le port `8443` du daemon doit être joignable depuis le conteneur. Sur Docker Desktop, c'est le cas via `host.docker.internal` (vérifié).
+The daemon's port `8443` must be reachable from the container. On Docker Desktop, it is, through `host.docker.internal` (verified).
 
-### Utiliser le skill avec Claude Code
+### Using the skill with Claude Code
 
-Le dépôt fournit `.mcp.json`, qui déclare le serveur `minireachy` sur `http://127.0.0.1:8765/mcp`, et le skill [`reachy-conversation`](.claude/skills/reachy-conversation/SKILL.md). Ouvrez Claude Code dans ce dossier, approuvez le serveur MCP du projet, puis demandez par exemple « parle avec Reachy » ou tapez `/reachy-conversation`.
+The repository provides `.mcp.json`, which declares the `minireachy` server at `http://127.0.0.1:8765/mcp`, and the [`reachy-conversation`](.claude/skills/reachy-conversation/SKILL.md) skill. Open Claude Code in this folder, approve the project's MCP server, then ask for example "talk with Reachy" or type `/reachy-conversation`.
 
-Le skill :
+The skill:
 
-1. vérifie la sécurité, le daemon et le flux média ;
-2. salue à voix haute ;
-3. enchaîne les tours `listen` → (`capture_image` si utile) → `speak`, avec des gestes d'antennes et des émotions enregistrées ;
-4. gère « stop », « au revoir » et les silences ;
-5. ramène la tête au neutre en fin de conversation.
+1. checks safety, the daemon and the media stream;
+2. greets aloud;
+3. chains `listen` → (`capture_image` if useful) → `speak` turns, with antenna gestures and recorded emotions;
+4. handles "stop", "goodbye" and silences;
+5. brings the head back to neutral at the end of the conversation.
 
-C'est Claude qui sert de « cerveau » : chaque tour correspond à quelques appels d'outils MCP. Il faut compter 4 à 10 s de latence par échange.
+Claude acts as the "brain": each turn corresponds to a few MCP tool calls. Expect 4 to 10 s of latency per exchange.
 
-### Validé sur le robot réel (11/10/2026)
+### Validated on the real robot (2026-10-11)
 
-* Image 1920×1080 reçue depuis le conteneur (environ 55 images/s), audio 16 kHz.
-* Reachy a dit une phrase de bienvenue, puis a entendu et transcrit correctement une question posée oralement (« Je veux que tu me dises quelle est la couleur de mon t-shirt »). Il a ensuite regardé avec sa caméra et répondu à voix haute.
-* Le sens des axes a été vérifié par la caméra : un tangage négatif lève la tête, et un lacet négatif la tourne vers la droite du robot. La convention de `turn_toward_sound` (lacet positif = gauche) est donc correcte.
-* La voix envoyée par WebRTC est bien jouée par le daemon (son journal indique « Setting up incoming audio playback »).
-* Si le pipeline média du daemon s'arrête (« Internal data stream error » dans le journal de Reachy Mini Control, observé une fois), le serveur le détecte (aucune image en 8 s) et réessaie en boucle. Il faut alors relancer Reachy Mini Control ; le serveur se reconnecte seul.
+* 1920×1080 image received from the container (about 55 frames/s), 16 kHz audio.
+* Reachy said a welcome sentence, then heard and correctly transcribed a question asked aloud ("Je veux que tu me dises quelle est la couleur de mon t-shirt"). It then looked with its camera and answered aloud.
+* The axis directions were verified with the camera: a negative pitch raises the head, and a negative yaw turns it to the robot's right. The `turn_toward_sound` convention (positive yaw = left) is therefore correct.
+* The voice sent over WebRTC is indeed played by the daemon (its log shows "Setting up incoming audio playback").
+* If the daemon's media pipeline stops ("Internal data stream error" in the Reachy Mini Control log, observed once), the server detects it (no frame within 8 s) and retries in a loop. Reachy Mini Control must then be restarted; the server reconnects on its own.
 
-### Exemples d'appels MCP
+### MCP call examples
 
-Lire l'état (JSON-RPC `tools/call`) :
+Read the state (JSON-RPC `tools/call`):
 
 ```json
 {"jsonrpc":"2.0","id":3,"method":"tools/call",
  "params":{"name":"get_full_state","arguments":{"with_doa":true}}}
 ```
 
-Hocher la tête, puis attendre la fin du mouvement (actions physiques activées) :
+Nod, then wait for the end of the movement (physical actions enabled):
 
 ```json
 {"jsonrpc":"2.0","id":4,"method":"tools/call",
  "params":{"name":"goto_pose","arguments":{"duration":1.0,"head_pose":{"pitch":0.25},"interpolation":"minjerk"}}}
 ```
 
-Réponse type : `{"accepted_by_daemon": true, "completion_confirmed": false, "move_uuid": "…", "preconditions": {...}}`. Ensuite :
+Typical response: `{"accepted_by_daemon": true, "completion_confirmed": false, "move_uuid": "…", "preconditions": {...}}`. Then:
 
 ```json
 {"jsonrpc":"2.0","id":5,"method":"tools/call",
  "params":{"name":"wait_for_move","arguments":{"move_uuid":"<uuid>","timeout_s":5}}}
 ```
 
-Jouer une émotion :
+Play an emotion:
 
 ```json
 {"jsonrpc":"2.0","id":6,"method":"tools/call",
  "params":{"name":"play_recorded_move","arguments":{"dataset_name":"pollen-robotics/reachy-mini-emotions-library","move_name":"cheerful1"}}}
 ```
 
-Avec le client Python du SDK, depuis un conteneur du réseau Compose :
+With the SDK Python client, from a container on the Compose network:
 
 ```python
 from mcp import Client
@@ -360,21 +436,21 @@ async with Client("http://minireachy-mcp:8765/mcp") as c:
     print((await c.call_tool("get_motor_status", {})).structured_content)   # {'mode': 'enabled'}
 ```
 
-## 10. Restrictions de sécurité
+## 10. Security restrictions
 
-* **Vie privée** : sans `ENABLE_PERCEPTION=true`, ni image ni écoute. Le flux WebRTC n'est même pas ouvert (testé). Les images et l'audio sont traités en mémoire et ne sont jamais écrits sur disque ni envoyés hors de la machine.
-* **Refus par défaut** : sans `ENABLE_PHYSICAL_ACTIONS=true`, aucun outil physique n'envoie de requête. Même la lecture de pré-vérification n'est pas faite (testé pour chaque outil). La présence d'un outil ne vaut jamais autorisation.
-* **Garde-fous de `goto_pose`** : par défaut, translation de la tête ±0,03 m, roulis/tangage ±0,6 rad, lacet de la tête ±1,2 rad, lacet du corps ±1,5 rad, antennes ±3,0 rad, durée de 0,3 à 10 s. Ces bornes, réglables, sont **propres au serveur MCP**. Ce ne sont pas des spécifications du robot : le schéma OpenAPI du daemon n'en publie aucune.
-* **Pré-conditions** : avant tout mouvement, le serveur lit l'état du daemon. Il refuse si l'état n'est pas `running` et avertit si les moteurs ne sont pas en mode `enabled`.
-* **Commande acceptée ≠ action terminée** : les mouvements renvoient `completion_confirmed: false` et un `move_uuid`. La fin se vérifie avec `wait_for_move` puis `get_full_state`. L'API ne permet pas de distinguer un mouvement terminé, arrêté ou en échec.
-* **Pas de relance des commandes** : seuls les GET sont relancés. Si une commande expire après son envoi, le serveur renvoie `uncertain_outcome` (« le daemon a PEUT-ÊTRE exécuté la commande ») et ne la renvoie jamais.
-* **Pas d'arrêt d'urgence matériel** : le daemon n'en expose aucun. `stop_all_moves` est un arrêt logiciel des mouvements, qui n'arrête ni les apps ni le wobbling.
-* **Entrées filtrées** : `play_sound` n'accepte qu'un nom de fichier, jamais de chemin absolu. Les segments de chemin sont encodés, y compris `/`. `install_app` n'envoie que l'enregistrement exact trouvé dans le catalogue du daemon.
-* **Non exposés** : `set_target` (saut instantané, sans durée), l'enregistrement et la suppression du jeton Hugging Face (le secret transiterait par le LLM), le flux OAuth navigateur, `health-check` (watchdog de l'application de bureau), le tableau de bord HTML et les maillages STL.
-* **Conteneur** : utilisateur non privilégié `mcp` (uid 10001), système de fichiers en lecture seule, `cap_drop: ALL`, `no-new-privileges`, aucun socket Docker monté, pas de `privileged`, pas de réseau hôte.
-* **Journaux** : chaque appel d'outil reçoit un identifiant `cid`, repris dans les requêtes vers le daemon (en-tête `X-Request-ID`). Les arguments des actions sont journalisés pour l'audit, sauf le contenu des fichiers. Les corps de réponse ne sont pas journalisés.
+* **Privacy**: without `ENABLE_PERCEPTION=true`, no image and no listening. The WebRTC stream is not even opened (tested). Images and audio are processed in memory and are never written to disk or sent off the machine.
+* **Refused by default**: without `ENABLE_PHYSICAL_ACTIONS=true`, no physical tool sends a request. Even the pre-check read is not performed (tested for every tool). The presence of a tool is never an authorization.
+* **`goto_pose` guardrails**: by default, head translation ±0.03 m, roll/pitch ±0.6 rad, head yaw ±1.2 rad, body yaw ±1.5 rad, antennas ±3.0 rad, duration from 0.3 to 10 s. These adjustable bounds are **specific to the MCP server**. They are not robot specifications: the daemon's OpenAPI schema publishes none.
+* **Preconditions**: before any movement, the server reads the daemon state. It refuses if the state is not `running` and warns if the motors are not in `enabled` mode.
+* **Accepted command ≠ completed action**: movements return `completion_confirmed: false` and a `move_uuid`. Completion is checked with `wait_for_move` then `get_full_state`. The API cannot distinguish a completed, stopped or failed movement.
+* **No command retries**: only GETs are retried. If a command times out after being sent, the server returns `uncertain_outcome` ("the daemon MAY have executed the command") and never sends it again.
+* **No hardware emergency stop**: the daemon exposes none. `stop_all_moves` is a software stop of movements, which stops neither apps nor wobbling.
+* **Filtered inputs**: `play_sound` only accepts a file name, never an absolute path. Path segments are encoded, including `/`. `install_app` only sends the exact record found in the daemon's catalog.
+* **Not exposed**: `set_target` (instant jump, no duration), saving and deleting the Hugging Face token (the secret would transit through the LLM), the browser OAuth flow, `health-check` (desktop application watchdog), the HTML dashboard and the STL meshes.
+* **Container**: unprivileged `mcp` user (uid 10001), read-only filesystem, `cap_drop: ALL`, `no-new-privileges`, no Docker socket mounted, no `privileged`, no host network.
+* **Logs**: each tool call receives a `cid` identifier, reused in requests to the daemon (`X-Request-ID` header). Action arguments are logged for audit, except file contents. Response bodies are not logged.
 
-## 11. Commandes de diagnostic
+## 11. Diagnostic commands
 
 ```bash
 docker compose ps
@@ -392,45 +468,51 @@ docker compose exec minireachy-mcp python -m minireachy_mcp.diagnose --drift
 docker inspect minireachy-mcp-minireachy-mcp-1 --format "{{.State.Health.Status}} restarts={{.RestartCount}}"
 ```
 
-Les journaux suivent le format `tool_call cid=… tool=… risk=… outcome=…` et `daemon_request cid=… method=… path=… status=…`.
+Logs follow the format `tool_call cid=… tool=… risk=… outcome=…` and `daemon_request cid=… method=… path=… status=…`.
 
-## 12. Tests et arrêt
+## 12. Tests and shutdown
 
-Tests unitaires et d'intégration, dans un conteneur **sans réseau** (`network_mode: none`, aucun accès possible au robot). Ils utilisent un daemon simulé, servi en HTTP réel :
+Unit and integration tests, in a container **without network** (`network_mode: none`, no possible access to the robot). They use a simulated daemon, served over real HTTP:
 
 ```bash
 docker compose --profile test run --rm tests
 ```
 
-Tests de bout en bout via la pile en cours d'exécution. Ils n'appellent que des outils de lecture, sur le daemon réel :
+End-to-end tests through the running stack. They only call read tools, on the real daemon:
 
 ```bash
 docker compose --profile e2e run --rm e2e
 ```
 
-Les tests couvrent la configuration, le client HTTP (erreurs 4xx/5xx, JSON invalide, réponses trop grandes, timeouts, connexion refusée, encodage des chemins), les portes de sécurité de chaque outil gardé, les garde-fous, les résultats incertains, la découverte et l'appel des outils avec un vrai client MCP (en mémoire et en Streamable HTTP), l'authentification Bearer, la protection DNS rebinding, `/healthz`, l'arrêt sur SIGTERM, l'écart entre l'OpenAPI et l'inventaire, et la configuration Docker/Compose.
+The tests cover configuration, the HTTP client (4xx/5xx errors, invalid JSON, oversized responses, timeouts, refused connection, path encoding), the safety gates of every guarded tool, the guardrails, uncertain outcomes, tool discovery and calls with a real MCP client (in-memory and over Streamable HTTP), Bearer authentication, DNS-rebinding protection, `/healthz`, shutdown on SIGTERM, the drift between the OpenAPI and the inventory, and the Docker/Compose configuration.
 
-Régénérer l'inventaire depuis la racine du dépôt (sous Git Bash pour Windows, préfixer la commande de `MSYS_NO_PATHCONV=1`) :
+Regenerate the inventory from the repository root (under Git Bash for Windows, prefix the command with `MSYS_NO_PATHCONV=1`):
 
 ```bash
 docker compose --profile test run --rm -v ./scripts:/app/scripts:ro -v ./docs:/app/docs tests python scripts/gen_inventory.py
 ```
 
-Arrêt (SIGTERM, arrêt propre en 2 s environ, code de sortie 0, aucune action robot) :
+Shutdown (SIGTERM, graceful stop in about 2 s, exit code 0, no robot action):
 
 ```bash
 docker compose down
 ```
 
-## 13. Limites connues et points non vérifiés
+## 13. Known limitations and unverified points
 
-* **Sur le robot réel, seuls `goto_pose` et `speak` ont été exécutés**, avec l'accord de l'opérateur. Les 28 autres endpoints implémentés ne sont testés que contre le daemon simulé, dont toutes les autres commandes physiques, d'administration et de configuration. Leur comportement réel reste à valider par l'opérateur, robot dégagé.
-* **Tête qui ne revient pas exactement en place** : sur ce robot, la tête atteint à peu près les poses vers le bas ou vers le côté, mais s'arrête avant la cible au retour (écart de 3 à 14° observé, stable dans le temps). Les antennes suivent fidèlement leurs consignes. La cause n'est pas identifiée (mécanique, étalonnage ?) et le daemon n'expose pas la position cible de la tête.
-* Lors d'un essai, le daemon s'est arrêté environ 25 s après deux mouvements, sans erreur visible côté MCP. L'incident ne s'est pas reproduit.
-* 29 endpoints ont été appelés avec succès sur le daemon réel v1.8.0, via le serveur conteneurisé. `read_audio_parameter` a aussi été appelé, mais il renvoie HTTP 500 « Errno 13 Access denied » sur cet hôte. C'est un problème d'accès USB côté daemon, le même en appel direct, et l'erreur est correctement remontée.
-* Les bornes de mouvement sont des choix conservateurs du serveur MCP. Les limites mécaniques réelles ne sont pas documentées par l'API.
-* `goto_pose` n'accepte que la représentation x/y/z/roulis/tangage/lacet. La forme matrice 4×4 de l'API n'est pas exposée en entrée, car elle est plus difficile à valider. Elle reste disponible en lecture.
-* Le réseau Linux (`host-gateway`, relais `socat`) est documenté mais n'a pas été testé ici. Seul Docker Desktop sous Windows l'a été.
-* L'authentification est un jeton Bearer statique, sans OAuth ni TLS intégrés.
-* Les formats exacts des réponses des endpoints de commande (`stop_move`, `set_mode`…) sont déclarés dans l'API comme de simples dictionnaires de chaînes. Ils sont donc renvoyés tels quels dans `daemon_response`.
-* Le schéma déclare `info.version = 0.1.0` (valeur FastAPI par défaut). La version réelle du daemon (1.8.0) se lit dans `get_daemon_status`.
+* **On the real robot, only `goto_pose` and `speak` were executed**, with the operator's approval. The other 28 implemented endpoints are only tested against the simulated daemon, including all other physical, administration and configuration commands. Their real behavior remains to be validated by the operator, with the robot clear of obstacles.
+* **Head that does not return exactly in place**: on this robot, the head roughly reaches downward or sideways poses, but stops short of the target on return (3 to 14° gap observed, stable over time). The antennas follow their setpoints faithfully. The cause is not identified (mechanics, calibration?) and the daemon does not expose the head's target position.
+* During one test, the daemon stopped about 25 s after two movements, with no visible error on the MCP side. The incident did not reproduce.
+* 29 endpoints were successfully called on the real daemon v1.8.0, through the containerized server. `read_audio_parameter` was also called, but it returns HTTP 500 "Errno 13 Access denied" on this host. This is a USB access problem on the daemon side, the same with a direct call, and the error is correctly reported.
+* The motion bounds are conservative choices of the MCP server. The real mechanical limits are not documented by the API.
+* `goto_pose` only accepts the x/y/z/roll/pitch/yaw representation. The API's 4×4 matrix form is not exposed as input, because it is harder to validate. It remains available for reading.
+* Linux networking (`host-gateway`, `socat` relay) is documented but was not tested here. Only Docker Desktop on Windows was.
+* Authentication is a static Bearer token, with no built-in OAuth or TLS.
+* The exact response formats of the command endpoints (`stop_move`, `set_mode`…) are declared in the API as plain string dictionaries. They are therefore returned as is in `daemon_response`.
+* The schema declares `info.version = 0.1.0` (FastAPI default value). The real daemon version (1.8.0) can be read from `get_daemon_status`.
+
+## 14. License
+
+This project is released under the [MIT License](LICENSE).
+
+The Docker image bundles third-party software and models that keep their own licenses (notably faster-whisper and its model, Piper and its voices, aiortc, GStreamer). Check them before redistributing the image, in particular the license of `piper-tts` (the Piper project is GPL-licensed) and of each voice in [`rhasspy/piper-voices`](https://huggingface.co/rhasspy/piper-voices).

@@ -1,4 +1,4 @@
-"""Generate docs/inventaire-api.md from the OpenAPI snapshot and the tool registry.
+"""Generate docs/api-inventory.md from the OpenAPI snapshot and the tool registry.
 
     docker compose --profile test run --rm -v ./scripts:/app/scripts:ro -v ./docs:/app/docs tests \
         python scripts/gen_inventory.py
@@ -34,26 +34,26 @@ REAL_OK = {
     "DELETE /api/media/sounds/{filename}",
 }
 REAL_NOTE = {
-    "GET /api/audio/config/parameter/{name}": "Appelé sur le daemon réel : HTTP 500 « Errno 13 Access denied » "
-    "(accès USB refusé côté hôte, identique en appel direct). Erreur correctement remontée.",
-    "GET /api/apps/list-available/{source_kind}": "Appel direct réel OK (installed) ; via MCP testé en simulation.",
-    "GET /api/apps/job-status/{job_id}": "Appel direct réel : 404 pour un id inconnu ; nominal testé en simulation.",
-    "POST /api/move/goto": "Robot réel : mouvements exécutés. La tête n'atteint pas exactement les poses de retour "
-    "(écart de 3 à 14°, voir README) ; les antennes suivent fidèlement.",
+    "GET /api/audio/config/parameter/{name}": "Called on the real daemon: HTTP 500 \"Errno 13 Access denied\" "
+    "(USB access denied on the host side, identical with a direct call). Error correctly reported.",
+    "GET /api/apps/list-available/{source_kind}": "Direct call on the real daemon OK (installed); via MCP tested in simulation.",
+    "GET /api/apps/job-status/{job_id}": "Direct call on the real daemon: 404 for an unknown id; nominal case tested in simulation.",
+    "POST /api/move/goto": "Real robot: movements executed. The head does not exactly reach the return poses "
+    "(3 to 14° gap, see README); the antennas follow faithfully.",
 }
-RISK_FR = {
-    Risk.READ: "Lecture", Risk.CONFIG: "Configuration", Risk.STOP: "Arrêt (toujours autorisé)",
-    Risk.PHYSICAL: "Physique", Risk.ADMIN: "Administration", Risk.PHYSICAL_ADMIN: "Physique + administration",
+RISK_LABEL = {
+    Risk.READ: "Read", Risk.CONFIG: "Configuration", Risk.STOP: "Stop (always allowed)",
+    Risk.PHYSICAL: "Physical", Risk.ADMIN: "Administration", Risk.PHYSICAL_ADMIN: "Physical + administration",
     Risk.PERCEPTION: "Perception",
 }
 EFFECTS = {
-    Risk.READ: "Aucun",
-    Risk.CONFIG: "Modifie un réglage ou un fichier non physique",
-    Risk.STOP: "Interrompt une activité",
-    Risk.PHYSICAL: "Mouvement, couple moteur, son ou app pilotant le robot",
-    Risk.ADMIN: "Cycle de vie / installation / matériel",
-    Risk.PHYSICAL_ADMIN: "Cycle de vie du backend, peut faire bouger le robot",
-    Risk.PERCEPTION: "Caméra ou micros",
+    Risk.READ: "None",
+    Risk.CONFIG: "Changes a setting or a non-physical file",
+    Risk.STOP: "Interrupts an activity",
+    Risk.PHYSICAL: "Movement, motor torque, sound or app driving the robot",
+    Risk.ADMIN: "Lifecycle / installation / hardware",
+    Risk.PHYSICAL_ADMIN: "Backend lifecycle, may make the robot move",
+    Risk.PERCEPTION: "Camera or microphones",
 }
 
 
@@ -82,7 +82,7 @@ def main() -> None:
         for method, op in ops.items():
             key = f"{method.upper()} {path}"
             params = ", ".join(
-                f"{p['name']} ({p['in']}{', requis' if p.get('required') else ''}: {_ref(p.get('schema', {}))})"
+                f"{p['name']} ({p['in']}{', required' if p.get('required') else ''}: {_ref(p.get('schema', {}))})"
                 for p in op.get("parameters", [])
             ) or "—"
             body = "—"
@@ -98,65 +98,65 @@ def main() -> None:
                 risk = Risk.READ if method == "get" else max(risks, key=list(Risk).index)
                 tool_names = ", ".join(f"`{t.name}`" for t in tools)
                 if key in REAL_OK:
-                    status = "Implémenté et testé (simulation + daemon réel)"
+                    status = "Implemented and tested (simulation + real daemon)"
                     counts["real"] += 1
                 else:
-                    status = "Implémenté, testé en simulation, non testé contre le daemon réel"
+                    status = "Implemented, tested in simulation, not tested against the real daemon"
                     counts["sim"] += 1
                 if key in REAL_NOTE:
                     status += ". " + REAL_NOTE[key]
                 rows.append((method.upper(), path, op.get("summary", ""), params, body, resp,
-                             EFFECTS[risk], RISK_FR[risk], tool_names, status))
+                             EFFECTS[risk], RISK_LABEL[risk], tool_names, status))
             else:
                 counts["excl"] += 1
                 rows.append((method.upper(), path, op.get("summary", ""), params, body, resp, "—", "—", "—",
-                             "Exclu : " + EXCLUDED[key]))
+                             "Excluded: " + EXCLUDED[key]))
 
     out = [
-        "# Inventaire de l'API du daemon MiniReachy",
+        "# MiniReachy daemon API inventory",
         "",
-        "Fichier généré par `scripts/gen_inventory.py` à partir de `docs/api/openapi.json` "
-        f"(daemon Reachy Mini v1.8.0, {sum(len(v) for v in spec['paths'].values())} opérations) "
-        "et du registre des outils MCP. Ne pas éditer à la main.",
+        "File generated by `scripts/gen_inventory.py` from `docs/api/openapi.json` "
+        f"(Reachy Mini daemon v1.8.0, {sum(len(v) for v in spec['paths'].values())} operations) "
+        "and the MCP tool registry. Do not edit by hand.",
         "",
-        "Authentification : le schéma ne déclare aucun mécanisme de sécurité, et aucun n'a été "
-        "nécessaire lors des appels réels.",
+        "Authentication: the schema declares no security mechanism, and none was "
+        "needed during the real calls.",
         "",
-        f"* Implémentés et testés contre le daemon réel : **{counts['real']}**",
-        f"* Implémentés, testés uniquement en simulation : **{counts['sim']}**",
-        f"* Exclus avec justification : **{counts['excl']}**",
-        f"* Bloqués : **{counts['blocked']}**",
+        f"* Implemented and tested against the real daemon: **{counts['real']}**",
+        f"* Implemented, tested in simulation only: **{counts['sim']}**",
+        f"* Excluded with justification: **{counts['excl']}**",
+        f"* Blocked: **{counts['blocked']}**",
         "",
-        "Commandes physiques testées sur le robot réel, avec l'accord de l'opérateur : `goto_pose` et `speak` "
-        "(upload + lecture d'un son). Toutes les autres commandes n'ont été testées qu'en simulation.",
+        "Physical commands tested on the real robot, with the operator's approval: `goto_pose` and `speak` "
+        "(upload + playback of a sound). All other commands were only tested in simulation.",
         "",
-        "| Méthode | Chemin | Description | Paramètres | Corps | Réponse 200 | Effets de bord | Risque | Outil(s) MCP | Statut |",
+        "| Method | Path | Description | Parameters | Body | 200 response | Side effects | Risk | MCP tool(s) | Status |",
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         out.append("| " + " | ".join(str(c).replace("|", "\\|") if i != 3 else str(c) for i, c in enumerate(r)) + " |")
     tools_only = [t for t in deps.registry.values() if not t.endpoints]
-    out += ["", "## Outils sans endpoint direct", ""]
+    out += ["", "## Tools without a direct endpoint", ""]
     local = {
-        "diagnose_connectivity": "diagnostic réseau en 4 étapes (DNS, TCP, HTTP, état du daemon).",
-        "get_server_safety_config": "configuration de sécurité du serveur MCP.",
-        "get_perception_status": "état du flux WebRTC et des modèles vocaux locaux.",
-        "capture_image": "image de la caméra, reçue par le flux WebRTC du daemon (port 8443, non décrit dans "
-        "l'OpenAPI). Testé sur le robot réel.",
+        "diagnose_connectivity": "4-step network diagnostic (DNS, TCP, HTTP, daemon state).",
+        "get_server_safety_config": "safety configuration of the MCP server.",
+        "get_perception_status": "state of the WebRTC stream and of the local voice models.",
+        "capture_image": "camera image, received through the daemon's WebRTC stream (port 8443, not described in "
+        "the OpenAPI). Tested on the real robot.",
     }
-    out += [f"* `{t.name}` : {local.get(t.name, 'calculé localement par le serveur MCP.')}" for t in tools_only]
+    out += [f"* `{t.name}` : {local.get(t.name, 'computed locally by the MCP server.')}" for t in tools_only]
     out += [
         "",
-        "## Flux média hors OpenAPI",
+        "## Media stream outside the OpenAPI",
         "",
-        "Le daemon exécute aussi un serveur média GStreamer `webrtcsink` avec son serveur de signalisation "
-        "(`ws://<hôte>:8443`, producteur `reachymini`). Il diffuse la vidéo de la caméra et l'audio des micros. "
-        "Ce flux n'apparaît pas dans l'OpenAPI ; il a été identifié dans le code du daemon "
-        "(`reachy_mini/media/media_server.py`) et validé en réel depuis le conteneur. Il alimente `capture_image` "
-        "et `listen`. La reconnaissance vocale (faster-whisper) et la synthèse vocale (Piper) tournent localement "
-        "dans le conteneur.",
+        "The daemon also runs a GStreamer `webrtcsink` media server with its signalling server "
+        "(`ws://<host>:8443`, producer `reachymini`). It broadcasts the camera video and the microphone audio. "
+        "This stream does not appear in the OpenAPI; it was identified in the daemon code "
+        "(`reachy_mini/media/media_server.py`) and validated on the real robot from the container. It feeds `capture_image` "
+        "and `listen`. Speech recognition (faster-whisper) and speech synthesis (Piper) run locally "
+        "in the container.",
     ]
-    (ROOT / "docs/inventaire-api.md").write_text("\n".join(out) + "\n", encoding="utf-8")
+    (ROOT / "docs/api-inventory.md").write_text("\n".join(out) + "\n", encoding="utf-8")
     print(counts, len(deps.registry), "tools")
 
 
