@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import contextlib
 import io
 import json
 import math
@@ -56,6 +57,17 @@ class StubLink:
         self.frame = av.VideoFrame.from_ndarray(img, format="rgb24")
         self.connected = 0
         self.speech_after_s: float | None = None
+        self.leases = 0
+        self.max_leases = 0
+
+    @contextlib.asynccontextmanager
+    async def use(self):
+        self.leases += 1
+        self.max_leases = max(self.max_leases, self.leases)
+        try:
+            yield
+        finally:
+            self.leases -= 1
 
     async def ensure_connected(self, timeout_s: float | None = None) -> None:
         if self.fail:

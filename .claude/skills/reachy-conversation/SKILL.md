@@ -19,6 +19,8 @@ Run these calls **in parallel** (in the same message):
 - `get_daemon_status`: `state` must be `running`. Otherwise, ask to (re)start Reachy Mini Control.
 - `get_perception_status`: `media_link.state` must be `webrtc:connected` and `warmup.state` must be `done` (the warm-up happens when the server starts). If not yet, it is not blocking: the first `converse` will open the stream.
 
+Once these checks pass, call `disable_wobbling`. With audio-reactive wobbling on, the head oscillates by about ±0.1 rad (±6°) while Reachy speaks (measured 2026-10-15). That pulls the camera off the person and looks like the head dropping. Gestures (`gesture_name`) and `head_turn` are unaffected.
+
 Do not fetch the list of emotions now. It is only useful if you play one (section 4).
 
 Announce in the chat that the conversation is starting and how to stop it (say "au revoir Reachy" or "stop").

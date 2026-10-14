@@ -143,3 +143,52 @@ async def test_blocked_event_loop_is_not_mistaken_for_a_dead_stream() -> None:
             assert age < 1.0
         finally:
             await link.close()
+
+
+async def _wait_for_state(link: MediaLink, state: str, timeout_s: float = 6.0) -> None:
+    import asyncio
+    import time as _time
+
+    deadline = _time.monotonic() + timeout_s
+    while link.stats.state != state:
+        assert _time.monotonic() < deadline, f"state {link.stats.state!r}, expected {state!r}"
+        await asyncio.sleep(0.1)
+
+
+async def test_idle_link_disconnects_then_reopens_on_demand() -> None:
+    async with FakeMediaServer() as media:
+        link = MediaLink(media.url, connect_timeout_s=20, idle_disconnect_s=1.0)
+        try:
+            await link.ensure_connected()
+            assert link.speaker is not None
+            await _wait_for_state(link, "idle_disconnected")
+            # Nothing is kept while unused: no session, no frame, no voice track, no buffered audio.
+            assert link.speaker is None and link._latest_frame is None
+            assert link.audio.rms_last(1.0) == 0.0
+            assert link.status()["state"] == "idle_disconnected"
+            frame, _ = await link.latest_frame()
+            assert frame.width == 640
+            assert media.sessions == 2
+        finally:
+            await link.close()
+
+
+async def test_link_in_use_or_speaking_is_not_disconnected() -> None:
+    import asyncio
+
+    from minireachy_mcp.media.speaker import RATE
+
+    async with FakeMediaServer() as media:
+        link = MediaLink(media.url, connect_timeout_s=20, idle_disconnect_s=0.5)
+        try:
+            async with link.use():  # e.g. a long listen()
+                await link.ensure_connected()
+                await asyncio.sleep(2.0)
+                assert link.stats.state == "webrtc:connected" and link.status()["in_use"] == 1
+            await link.ensure_connected()
+            link.speaker.enqueue(np.zeros(int(2.0 * RATE), dtype=np.int16))  # 2 s of queued voice
+            await asyncio.sleep(1.5)
+            assert link.stats.state == "webrtc:connected" and media.sessions == 1
+            await _wait_for_state(link, "idle_disconnected")  # once drained and unused
+        finally:
+            await link.close()

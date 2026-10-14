@@ -14,6 +14,7 @@ allowed because it only reduces activity.
 
 from __future__ import annotations
 
+import math
 from enum import StrEnum
 
 from .config import Settings
@@ -60,6 +61,12 @@ def check_motion(
     """Validate a goto request against the configured `MotionLimits`."""
     lim = settings.limits
     errors: list[str] = []
+    # NaN compares False with every bound, so it would slip through the checks below.
+    values = [duration, *(antennas or ()), *([body_yaw] if body_yaw is not None else [])]
+    if head_pose is not None:
+        values += [head_pose.x, head_pose.y, head_pose.z, head_pose.roll, head_pose.pitch, head_pose.yaw]
+    if not all(math.isfinite(v) for v in values):
+        raise SafetyGateError("Motion request rejected by the server guard rails: values must be finite numbers.")
     if not lim.min_move_duration_s <= duration <= lim.max_move_duration_s:
         errors.append(f"duration={duration}s outside [{lim.min_move_duration_s}, {lim.max_move_duration_s}] s")
     if head_pose is not None:

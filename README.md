@@ -146,6 +146,7 @@ All variables are documented in [.env.example](.env.example). The main ones:
 | `ENABLE_ADMIN_ACTIONS` | `false` | Allows daemon lifecycle, app installation, media release and audio DSP |
 | `ENABLE_PERCEPTION` | `false` | Allows the camera (`capture_image`) and listening (`listen`) |
 | `MEDIA_SIGNALLING_URL` | `ws://host.docker.internal:8443` | WebRTC signalling of the daemon's media server |
+| `MEDIA_IDLE_DISCONNECT_S` | `300` | Closes the camera/microphone stream after this many seconds without use (`0` = never). It reopens on demand in about 3 s |
 | `STT_LANGUAGE`, `STT_BEAM_SIZE`, `TTS_LENGTH_SCALE` | `fr`, `1`, `1.0` | Language and settings of speech recognition and synthesis |
 | `TTS_VOICE_PATH_EN` | `en_US-lessac-medium` voice | English voice, used when `speak`/`converse` receive `language="en"`. Empty = disabled |
 | `LIMIT_*` | see `.env.example` | `goto_pose` guardrails, specific to the MCP server |
@@ -335,7 +336,7 @@ All tools return structured JSON (`structuredContent`). Errors are returned with
 
 The daemon runs a GStreamer media server (`webrtcsink`) that broadcasts the camera and the microphones over WebRTC. Its signalling server runs on port `8443` of the host. This stream is **not** in the OpenAPI: it was identified in the daemon code (`reachy_mini/media/media_server.py`). It is the official channel used by the remote SDK and by browsers.
 
-The MCP server connects to it as an ordinary client (aiortc library), on demand: at the first `capture_image` or `listen`, in about 3 s. It reconnects automatically if the daemon restarts. The container therefore never accesses USB directly.
+The MCP server connects to it as an ordinary client (aiortc library), on demand: at the first `capture_image` or `listen`, in about 3 s. It reconnects automatically if the daemon restarts. The container therefore never accesses USB directly. After `MEDIA_IDLE_DISCONNECT_S` (300 s by default) without any perception or voice call, the stream is closed and the buffered microphone audio is erased; the next call reopens it (`get_perception_status` then shows `idle_disconnected`).
 
 ```
 mics/camera ─ daemon (host) ─ WebRTC :8443 ─▶ container: aiortc ─▶ JPEG image / 16 kHz audio ─▶ faster-whisper ─▶ text
@@ -438,7 +439,7 @@ async with Client("http://minireachy-mcp:8765/mcp") as c:
 
 ## 10. Security restrictions
 
-* **Privacy**: without `ENABLE_PERCEPTION=true`, no image and no listening. The WebRTC stream is not even opened (tested). Images and audio are processed in memory and are never written to disk or sent off the machine.
+* **Privacy**: without `ENABLE_PERCEPTION=true`, no image and no listening. The WebRTC stream is not even opened (tested). Images and audio are processed in memory and are never written to disk or sent off the machine. While the stream is open (from the startup warm-up or the last perception/voice call, until `MEDIA_IDLE_DISCONNECT_S` of inactivity), the microphones are captured **continuously** into an in-memory buffer of the last 60 s, so that `listen` can estimate the noise level; that buffer is erased when the stream goes idle.
 * **Refused by default**: without `ENABLE_PHYSICAL_ACTIONS=true`, no physical tool sends a request. Even the pre-check read is not performed (tested for every tool). The presence of a tool is never an authorization.
 * **`goto_pose` guardrails**: by default, head translation ±0.03 m, roll/pitch ±0.6 rad, head yaw ±1.2 rad, body yaw ±1.5 rad, antennas ±3.0 rad, duration from 0.3 to 10 s. These adjustable bounds are **specific to the MCP server**. They are not robot specifications: the daemon's OpenAPI schema publishes none.
 * **Preconditions**: before any movement, the server reads the daemon state. It refuses if the state is not `running` and warns if the motors are not in `enabled` mode.

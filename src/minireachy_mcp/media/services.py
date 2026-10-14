@@ -34,7 +34,8 @@ class MediaServices:
             voices["en"] = TextToSpeech(s.tts_voice_path_en, length_scale=s.tts_length_scale, language="en")
         return cls(
             link=MediaLink(s.media_signalling_url, producer_name=s.media_producer_name,
-                           connect_timeout_s=s.media_connect_timeout_s),
+                           connect_timeout_s=s.media_connect_timeout_s,
+                           idle_disconnect_s=s.media_idle_disconnect_s),
             stt=SpeechToText(s.stt_model_path, language=s.stt_language, compute_type=s.stt_compute_type,
                              beam_size=s.stt_beam_size, cpu_threads=s.stt_cpu_threads,
                              initial_prompt=s.stt_initial_prompt, vad_filter=s.stt_vad_filter),

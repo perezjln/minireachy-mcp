@@ -90,6 +90,7 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         duration: Annotated[
             float,
             Field(
+                allow_inf_nan=False,
                 description=f"Movement duration in seconds (server guard rail: "
                 f"{lim.min_move_duration_s}–{lim.max_move_duration_s} s).",
             ),
@@ -103,11 +104,11 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
             ),
         ] = None,
         antennas: Annotated[
-            tuple[float, float] | None,
+            tuple[Annotated[float, Field(allow_inf_nan=False)], Annotated[float, Field(allow_inf_nan=False)]] | None,
             Field(description=f"Target antenna angles [left, right] in radians (guard rail ±{lim.max_antenna_rad})."),
         ] = None,
         body_yaw: Annotated[
-            float | None, Field(description=f"Target body yaw in radians (guard rail ±{lim.max_body_yaw_rad}).")
+            float | None, Field(allow_inf_nan=False, description=f"Target body yaw in radians (guard rail ±{lim.max_body_yaw_rad}).")
         ] = None,
         interpolation: InterpolationTechnique = InterpolationTechnique.minjerk,
     ) -> dict[str, Any]:

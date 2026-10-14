@@ -24,6 +24,7 @@ import ipaddress
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,6 +38,10 @@ logger = logging.getLogger("minireachy_mcp.media.webrtc")
 
 class MediaUnavailableError(Exception):
     """The robot media stream could not be obtained."""
+
+
+class _IdleDisconnect(Exception):
+    """Internal: the stream was unused for `idle_disconnect_s` and is closed until needed again."""
 
 
 @dataclass
@@ -114,8 +119,12 @@ class MediaLink:
         first_media_timeout_s: float = 8.0,
         stall_timeout_s: float = 5.0,
         ignored_networks: tuple[str, ...] = DEFAULT_IGNORED_NETWORKS,
+        idle_disconnect_s: float = 0.0,
     ) -> None:
         self.signalling_url = signalling_url
+        # 0 = never: otherwise the camera and microphones are only streamed (and decoded, and
+        # buffered in memory) while something uses them, plus this grace period.
+        self.idle_disconnect_s = idle_disconnect_s
         self.producer_name = producer_name
         self.connect_timeout_s = connect_timeout_s
         self.first_media_timeout_s = first_media_timeout_s
@@ -132,15 +141,36 @@ class MediaLink:
         self._task: asyncio.Task[None] | None = None
         self._ready = asyncio.Event()
         self._closing = False
+        self._wanted = asyncio.Event()  # set by callers; cleared when the link goes idle
+        self._leases = 0  # callers currently relying on the stream (listening, speaking, looking)
+        self._last_used = time.monotonic()
 
     # -- public API ---------------------------------------------------------------------
 
+    @contextlib.asynccontextmanager
+    async def use(self) -> AsyncIterator[None]:
+        """Keep the stream open for the duration of the block (no idle disconnection)."""
+        self._leases += 1
+        self._last_used = time.monotonic()
+        try:
+            yield
+        finally:
+            self._leases -= 1
+            self._last_used = time.monotonic()
+
+    def _idle(self) -> bool:
+        if not self.idle_disconnect_s or self._leases or (self.speaker is not None and self.speaker.busy):
+            return False
+        return time.monotonic() - self._last_used > self.idle_disconnect_s
+
     async def ensure_connected(self, timeout_s: float | None = None) -> None:
         """Start the session if needed and wait until media is flowing."""
+        self._last_used = time.monotonic()
         async with self._lock:
             if self._task is None or self._task.done():
                 self._ready.clear()
                 self._task = asyncio.create_task(self._run(), name="minireachy-webrtc")
+            self._wanted.set()  # wakes up a link that went idle
         try:
             await asyncio.wait_for(self._ready.wait(), timeout_s or self.connect_timeout_s)
         except TimeoutError:
@@ -187,6 +217,9 @@ class MediaLink:
             "sessions": s.extra.get("sessions", 0),
             "speaker_ready": self.speaker is not None,
             "speaker_frames_sent": getattr(self.speaker, "frames_sent", 0),
+            "idle_disconnect_s": self.idle_disconnect_s or None,
+            "unused_for_s": round(now - self._last_used, 1),
+            "in_use": self._leases,
             "selected_ice_pair": s.extra.get("ice_pair"),
             "ignored_candidates": s.extra.get("ignored_candidates", 0),
             "last_error": s.last_error,
@@ -202,6 +235,16 @@ class MediaLink:
                 backoff = 1.0
             except asyncio.CancelledError:
                 raise
+            except _IdleDisconnect:
+                self.stats.state = "idle_disconnected"
+                self._ready.clear()
+                self.audio.wipe()  # do not keep the last minute of microphone audio while unused
+                logger.info("webrtc stream closed after %.0fs without use", self.idle_disconnect_s)
+                # _wanted was cleared when idleness was detected: a caller arriving since then
+                # has set it again, so this returns at once instead of losing the wake-up.
+                await self._wanted.wait()
+                backoff = 1.0
+                continue
             except Exception as exc:  # keep the link alive across daemon restarts
                 self.stats.last_error = f"{type(exc).__name__}: {exc}"[:300]
                 logger.warning("webrtc session ended: %s", self.stats.last_error)
@@ -333,6 +376,9 @@ class MediaLink:
                             await asyncio.sleep(1.0)  # let the backlog of packets be processed
                             continue
                         last_tick = now
+                        if self._idle():
+                            self._wanted.clear()
+                            raise _IdleDisconnect
                         last = max(self.stats.last_video_at or 0.0, self.stats.last_audio_at or 0.0)
                         if not first_media:
                             if last >= session_start:

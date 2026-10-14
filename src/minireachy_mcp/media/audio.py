@@ -41,6 +41,10 @@ class AudioRing:
         self.total += n
         self.changed.set()
 
+    def wipe(self) -> None:
+        """Erase the buffered audio (indices keep increasing; old samples now read as silence)."""
+        self._buf[:] = 0.0
+
     def read(self, start: int, end: int | None = None) -> np.ndarray:
         """Samples in [start, end) (absolute indices), clipped to what is still buffered."""
         end = self.total if end is None else min(end, self.total)

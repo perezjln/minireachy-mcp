@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal
 import anyio
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from ..client import seg
@@ -45,6 +46,7 @@ HEAD_GESTURES: dict[str, list[tuple[tuple[float, float], float]]] = {
     "oui": [((0.15, 0.0), 0.3), ((-0.05, 0.0), 0.3), ((0.12, 0.0), 0.3), ((0.0, 0.0), 0.35)],
     "non": [((0.0, 0.2), 0.3), ((0.0, -0.2), 0.4), ((0.0, 0.15), 0.35), ((0.0, 0.0), 0.35)],
 }
+_Finite = Annotated[float, Field(allow_inf_nan=False)]
 GestureName = Literal["aucun", "salut", "joie", "curiosite", "oui", "non"]
 LookMode = Literal["auto", "after", "never"]
 
@@ -69,7 +71,8 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
     # Last image returned to the client, with the head pose read at the same instant: a point
     # chosen in that image stays valid even if the head moved since.
     last_view: dict[str, Any] = {}
-    camera: dict[str, Any] = {}
+    camera: dict[int, float] = {}
+    voice_lock = anyio.Lock()
 
     # -- head direction helpers -----------------------------------------------------------
 
@@ -104,6 +107,9 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
 
     def clamp_head(pitch: float, yaw: float) -> tuple[dict[str, float], bool]:
         """Straight head (roll 0, centered) toward pitch/yaw, clamped to the guard rails."""
+        if not (math.isfinite(pitch) and math.isfinite(yaw)):
+            # min/max would turn NaN into the largest allowed angle.
+            raise ToolError(f"invalid head target (pitch={pitch}, yaw={yaw}): values must be finite numbers")
         p = max(-lim.max_head_pitch_rad, min(lim.max_head_pitch_rad, pitch))
         y = max(-lim.max_head_yaw_rad, min(lim.max_head_yaw_rad, yaw))
         pose = {"x": 0.0, "y": 0.0, "z": 0.0, "roll": 0.0, "pitch": round(p, 4), "yaw": round(y, 4)}
@@ -154,6 +160,11 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         return voice, language
 
     async def say(text: str, speed: float, wait: bool, language: str | None = None) -> dict[str, Any]:
+        # One voice at a time: concurrent calls would interleave their sentences on the speaker.
+        async with voice_lock, m.link.use():
+            return await say_unlocked(text, speed, wait, language)
+
+    async def say_unlocked(text: str, speed: float, wait: bool, language: str | None) -> dict[str, Any]:
         tts, voice = pick_voice(language)
         mode = s.speech_output
         if mode == "webrtc" or (mode == "auto" and s.enable_perception):
@@ -240,6 +251,11 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
 
     async def hear(max_wait_s: float, max_utterance_s: float, silence_ms: int | None,
                    language: str | None) -> dict[str, Any]:
+        async with m.link.use():  # the stream must not go idle while we are listening
+            return await listen_for_utterance(max_wait_s, max_utterance_s, silence_ms, language)
+
+    async def listen_for_utterance(max_wait_s: float, max_utterance_s: float, silence_ms: int | None,
+                                   language: str | None) -> dict[str, Any]:
         await m.link.ensure_connected()
         silence = silence_ms or s.listen_silence_ms
         early = s.listen_early_silence_ms if s.listen_early_silence_ms and s.listen_early_silence_ms < silence else None
@@ -260,14 +276,18 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
             doa_task = asyncio.ensure_future(c.get("/api/state/doa"))
             speculative_hit = False
             tr = None
-            if utt.speculative is not None:
-                try:
-                    tr = await utt.speculative
-                    speculative_hit = True
-                except (asyncio.CancelledError, Exception):
-                    tr = None
-            if tr is None:
-                tr = await transcribe(utt.audio)
+            try:
+                if utt.speculative is not None:
+                    try:
+                        tr = await utt.speculative
+                        speculative_hit = True
+                    except Exception:  # not CancelledError: a cancelled tool call must stop here
+                        tr = None
+                if tr is None:
+                    tr = await transcribe(utt.audio)
+            except BaseException:
+                doa_task.cancel()  # never leave an orphan request task behind
+                raise
             try:
                 doa = await doa_task
             except DaemonError:
@@ -295,7 +315,8 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
                 "ignored_sounds": ignored}
 
     async def snapshot(max_width: int, quality: int) -> tuple[Image, dict[str, Any]]:
-        (frame, age), head = await asyncio.gather(m.link.latest_frame(), present_head())
+        async with m.link.use():
+            (frame, age), head = await asyncio.gather(m.link.latest_frame(), present_head())
 
         def encode() -> tuple[bytes, tuple[int, int]]:
             img = frame.to_image()
@@ -428,6 +449,9 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         deps,
         risk=Risk.PERCEPTION,
         structured=False,
+        # Gated on perception, but it may also speak and move the head: never advertise it as read-only.
+        annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False,
+                                    open_world_hint=True),
         endpoints=("POST /api/media/sounds/upload", "POST /api/media/play_sound",
                    "DELETE /api/media/sounds/{filename}", "POST /api/move/goto", "GET /api/state/doa",
                    "GET /api/state/present_head_pose", "GET /api/camera/specs"),
@@ -450,12 +474,12 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
                   "= always, 'never' (or false) = no image."),
         ] = "auto",
         look_at_point: Annotated[
-            tuple[float, float] | None,
+            tuple[_Finite, _Finite] | None,
             Field(description="Turn the head while speaking so that this pixel [x, y] of the LAST image "
                   "returned (by converse or capture_image) comes to the center of the view."),
         ] = None,
         head_turn: Annotated[
-            tuple[float, float] | None,
+            tuple[_Finite, _Finite] | None,
             Field(description="Turn the head while speaking by [yaw, pitch] radians relative to where it "
                   "points now (yaw > 0 = Reachy's left, pitch > 0 = down). The head is also straightened."),
         ] = None,
@@ -601,6 +625,8 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         if not doa:
             return {"turned": False, "reason": "direction of arrival unavailable"}
         yaw = math.pi / 2 - float(doa["angle"])
+        if not math.isfinite(yaw):  # min/max below would turn NaN into the full guard-rail angle
+            return {"turned": False, "reason": f"invalid direction of arrival {doa.get('angle')!r}"}
         yaw = max(-lim.max_head_yaw_rad, min(lim.max_head_yaw_rad, yaw))
         pose = {"x": 0.0, "y": 0.0, "z": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": round(yaw, 4)}
         check_motion(s, head_pose=HeadPose(**pose), antennas=None, body_yaw=None, duration=duration)

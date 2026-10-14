@@ -23,7 +23,9 @@ async def test_tool_discovery_and_annotations(mcp_session) -> None:
         risk = deps.registry[name].risk
         assert tool.description and len(tool.description) > 30, name
         assert tool.input_schema["type"] == "object"
-        assert tool.annotations.read_only_hint is (risk in (Risk.READ, Risk.PERCEPTION)), name
+        # converse is gated on perception but may also speak and move: it is never read-only.
+        read_only = risk in (Risk.READ, Risk.PERCEPTION) and name != "converse"
+        assert tool.annotations.read_only_hint is read_only, name
         if risk in (Risk.PHYSICAL, Risk.ADMIN, Risk.PHYSICAL_ADMIN):
             assert tool.annotations.destructive_hint is True and "SAFETY" in tool.description
     goto = listed["goto_pose"].input_schema

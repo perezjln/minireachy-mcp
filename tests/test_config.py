@@ -69,3 +69,10 @@ def test_speed_defaults() -> None:
     assert s.stt_vad_filter is False and s.stt_cpu_threads == 8 and s.media_warmup is True
     assert load_settings({"MEDIA_WARMUP": "false", "LISTEN_EARLY_SILENCE_MS": "0"}).media_warmup is False
     assert s.speech_output == "auto" and load_settings({"SPEECH_OUTPUT": "daemon"}).speech_output == "daemon"
+
+
+def test_media_idle_disconnect() -> None:
+    assert load_settings({}).media_idle_disconnect_s == 300
+    assert load_settings({"MEDIA_IDLE_DISCONNECT_S": "0"}).media_idle_disconnect_s == 0
+    with pytest.raises(ConfigError, match="media_idle_disconnect_s"):
+        load_settings({"MEDIA_IDLE_DISCONNECT_S": "-1"})

@@ -78,6 +78,9 @@ class Settings(BaseModel):
     media_signalling_url: str = "ws://host.docker.internal:8443"
     media_producer_name: str = "reachymini"
     media_connect_timeout_s: float = Field(25.0, gt=0, le=120)  # room for one automatic retry
+    # Close the camera/microphone stream after this long without use (0 = keep it open forever).
+    # It reopens on the next perception or voice call (~3 s).
+    media_idle_disconnect_s: float = Field(300.0, ge=0, le=86_400)
     stt_model_path: str = "/opt/models/whisper"
     stt_language: str = Field("fr", pattern=r"^[a-z]{2}$")
     stt_compute_type: Literal["int8", "int8_float32", "float32"] = "int8"
@@ -163,6 +166,7 @@ _SCALARS = {
     "MEDIA_SIGNALLING_URL": "media_signalling_url",
     "MEDIA_PRODUCER_NAME": "media_producer_name",
     "MEDIA_CONNECT_TIMEOUT": "media_connect_timeout_s",
+    "MEDIA_IDLE_DISCONNECT_S": "media_idle_disconnect_s",
     "STT_MODEL_PATH": "stt_model_path",
     "STT_LANGUAGE": "stt_language",
     "STT_COMPUTE_TYPE": "stt_compute_type",

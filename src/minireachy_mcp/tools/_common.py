@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+import anyio
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -70,10 +71,12 @@ def register(
     endpoints: tuple[str, ...] = (),
     title: str | None = None,
     structured: bool = True,
+    annotations: ToolAnnotations | None = None,
 ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
     """Register an async tool with gating, correlation id, logging and error mapping.
 
     The wrapped function keeps its signature so the SDK builds the input schema from it.
+    `annotations` overrides the hints derived from `risk` (for tools whose effects span classes).
     """
 
     def decorator(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
@@ -100,6 +103,20 @@ def register(
             except MediaUnavailableError as exc:
                 outcome = "media_unavailable"
                 raise ToolError(f"[media_unavailable] {exc}") from None
+            except ToolError:
+                outcome = "tool_error"
+                raise
+            except anyio.get_cancelled_exc_class():
+                outcome = "cancelled"
+                raise
+            except Exception:
+                # Unexpected payload shape or bug: keep details in the server log, not in the LLM context.
+                outcome = "internal_error"
+                logger.exception("tool_error cid=%s tool=%s", cid, name)
+                raise ToolError(
+                    f"[internal_error] Unexpected server error (cid={cid}); details are in the server log. "
+                    "If the tool sends commands, read the robot state before retrying."
+                ) from None
             finally:
                 logger.info(
                     "tool_call cid=%s tool=%s risk=%s outcome=%s duration_ms=%.0f",
@@ -114,7 +131,7 @@ def register(
             name=name,
             title=title,
             description=description,
-            annotations=_ANNOTATIONS[risk],
+            annotations=annotations or _ANNOTATIONS[risk],
             structured_output=structured,
         )
         deps.registry[name] = ToolSpec(name=name, risk=risk, endpoints=endpoints)
