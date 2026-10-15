@@ -15,6 +15,7 @@ allowed because it only reduces activity.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from enum import StrEnum
 
 from .config import Settings
@@ -92,6 +93,28 @@ def check_motion(
         errors.append("at least one of head_pose, antennas or body_yaw is required")
     if errors:
         raise SafetyGateError("Motion request rejected by the server guard rails: " + "; ".join(errors) + ".")
+
+
+_HEAD_AXES = ("roll", "pitch", "yaw")
+
+
+def head_delta(start: Mapping[str, float], target: Mapping[str, float]) -> float:
+    """Largest roll/pitch/yaw change in radians between two head poses."""
+    return max(abs(float(target.get(a, 0.0)) - float(start.get(a, 0.0))) for a in _HEAD_AXES)
+
+
+def check_head_speed(
+    settings: Settings, *, start: Mapping[str, float], target: Mapping[str, float], duration: float
+) -> None:
+    """Refuse a head move whose average angular speed from `start` exceeds the guard rail."""
+    limit = settings.limits.max_head_speed_rad_s
+    delta = head_delta(start, target)
+    if delta / duration > limit:
+        raise SafetyGateError(
+            f"Motion request rejected by the server guard rails: the head would turn {delta:.2f} rad in "
+            f"{duration} s ({delta / duration:.1f} rad/s > {limit} rad/s); use duration >= "
+            f"{math.ceil(delta / limit * 10) / 10} s."
+        )
 
 
 def describe(settings: Settings) -> dict[str, object]:

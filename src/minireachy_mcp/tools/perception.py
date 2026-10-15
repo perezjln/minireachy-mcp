@@ -24,6 +24,7 @@ from ..media.webrtc import MediaUnavailableError
 from ..models import HeadPose
 from ..safety import Risk, check_motion, require
 from ._common import Deps, register
+from ._motion import MotionInterrupted, move_uuid
 
 logger = logging.getLogger("minireachy_mcp.tools")
 
@@ -66,22 +67,17 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
     c = deps.client
     m = deps.media
     s = deps.settings
+    mo = deps.motion
     lim = s.limits
     last_tts_file: dict[str, str | None] = {"name": None}
-    # Last image returned to the client, with the head pose read at the same instant: a point
-    # chosen in that image stays valid even if the head moved since.
+    # Last image returned to the client, with the head pose read at the same instant (and the
+    # head target relative moves start from): a point chosen in that image stays valid even if
+    # the head moved since.
     last_view: dict[str, Any] = {}
     camera: dict[int, float] = {}
     voice_lock = anyio.Lock()
 
     # -- head direction helpers -----------------------------------------------------------
-
-    async def present_head() -> dict[str, float] | None:
-        try:
-            pose = await c.get("/api/state/present_head_pose")
-        except DaemonError:
-            return None
-        return pose if isinstance(pose, dict) and "yaw" in pose else None
 
     async def focal_px(source_width: int) -> float:
         """Focal length in pixels of the streamed image (pinhole approximation, center = image center).
@@ -105,15 +101,7 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
             camera[source_width] = focal
         return camera[source_width]
 
-    def clamp_head(pitch: float, yaw: float) -> tuple[dict[str, float], bool]:
-        """Straight head (roll 0, centered) toward pitch/yaw, clamped to the guard rails."""
-        if not (math.isfinite(pitch) and math.isfinite(yaw)):
-            # min/max would turn NaN into the largest allowed angle.
-            raise ToolError(f"invalid head target (pitch={pitch}, yaw={yaw}): values must be finite numbers")
-        p = max(-lim.max_head_pitch_rad, min(lim.max_head_pitch_rad, pitch))
-        y = max(-lim.max_head_yaw_rad, min(lim.max_head_yaw_rad, yaw))
-        pose = {"x": 0.0, "y": 0.0, "z": 0.0, "roll": 0.0, "pitch": round(p, 4), "yaw": round(y, 4)}
-        return pose, (p, y) != (pitch, yaw)
+    clamp_head = mo.clamp_head
 
     async def head_toward_point(x: float, y: float) -> dict[str, Any]:
         """Target head pose that puts pixel (x, y) of the last image at the image center."""
@@ -122,7 +110,9 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         width, height = last_view["image_size"]
         if not (0 <= x <= width and 0 <= y <= height):
             raise ToolError(f"point ({x}, {y}) is outside the last image ({width}x{height})")
-        base = last_view["head_pose"]
+        # The image shows where the head really pointed (`head_pose`), but the new target is built
+        # on the target commanded at that time: the head's tracking error then does not add up.
+        base = last_view["head_reference"]
         if base is None:
             raise ToolError("the head pose at the time of the last image is unknown (daemon unreachable)")
         source_w = last_view["source_resolution"][0]
@@ -133,11 +123,10 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         return {"head_pose": pose, "clamped": clamped, "offset_rad": {"yaw": round(d_yaw, 3),
                                                                       "pitch": round(d_pitch, 3)}}
 
-    async def send_head(pose: dict[str, float], duration: float) -> str | None:
+    async def send_head(pose: dict[str, float], duration: float, epoch: int | None = None) -> str | None:
         check_motion(s, head_pose=HeadPose(**pose), antennas=None, body_yaw=None, duration=duration)
-        move = await c.post("/api/move/goto", json_body={"head_pose": pose, "duration": duration,
-                                                         "interpolation": "minjerk"})
-        return move.get("uuid") if isinstance(move, dict) else None
+        body = {"head_pose": pose, "duration": duration, "interpolation": "minjerk"}
+        return move_uuid(await mo.send_goto(body, epoch=epoch))
 
     # -- shared implementations ---------------------------------------------------------
 
@@ -316,7 +305,7 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
 
     async def snapshot(max_width: int, quality: int) -> tuple[Image, dict[str, Any]]:
         async with m.link.use():
-            (frame, age), head = await asyncio.gather(m.link.latest_frame(), present_head())
+            (frame, age), head = await asyncio.gather(m.link.latest_frame(), mo.present_head())
 
         def encode() -> tuple[bytes, tuple[int, int]]:
             img = frame.to_image()
@@ -329,34 +318,42 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         meta = {"source_resolution": [frame.width, frame.height], "image_size": list(size),
                 "frame_age_s": round(age, 3), "bytes": len(data)}
         last_view.clear()
-        last_view.update(meta, head_pose=head)
+        last_view.update(meta, head_pose=head, head_reference=mo.reference(head)[0])
         return Image(data=data, format="jpeg"), meta
 
-    async def gesture(name: str, base: dict[str, float] | None = None) -> dict[str, Any]:
+    async def gesture(name: str, epoch: int, base: dict[str, float] | None = None) -> dict[str, Any]:
         """Antenna or head sequence; each step is sent then awaited for its duration.
 
-        Head gestures move around `base` (the head target just commanded) or the present head pose.
+        Head gestures move around `base` (the head target just commanded) or the head reference.
+        A stop_all_moves since `epoch` ends the sequence: no further step is sent.
         """
-        if name in HEAD_GESTURES:
-            base = base or await present_head() or {"pitch": 0.0, "yaw": 0.0}
-            sent = 0
-            for (d_pitch, d_yaw), duration in HEAD_GESTURES[name]:
-                pose, _ = clamp_head(base["pitch"] + d_pitch, base["yaw"] + d_yaw)
-                await send_head(pose, max(duration, lim.min_move_duration_s))
-                sent += 1
-                await anyio.sleep(max(duration, lim.min_move_duration_s))
-            return {"gesture": name, "steps_sent": sent}
-        steps = GESTURES[name]
-        for (left, right), duration in steps:
-            check_motion(s, head_pose=None, antennas=(left, right), body_yaw=None,
-                         duration=max(duration, lim.min_move_duration_s))
         sent = 0
-        for (left, right), duration in steps:
-            d = max(duration, lim.min_move_duration_s)
-            await c.post("/api/move/goto", json_body={"antennas": [left, right], "duration": d,
-                                                      "interpolation": "minjerk"})
-            sent += 1
-            await anyio.sleep(d)
+        try:
+            if name in HEAD_GESTURES:
+                if base is None:
+                    base, _, _ = await mo.head_reference()
+                base = base or {"pitch": 0.0, "yaw": 0.0}
+                previous: dict[str, float] = base
+                for (d_pitch, d_yaw), duration in HEAD_GESTURES[name]:
+                    pose, _ = clamp_head(base["pitch"] + d_pitch, base["yaw"] + d_yaw)
+                    d = mo.head_duration(previous, pose, duration)
+                    await send_head(pose, d, epoch)
+                    sent += 1
+                    previous = pose
+                    await anyio.sleep(d)
+                return {"gesture": name, "steps_sent": sent}
+            steps = GESTURES[name]
+            for (left, right), duration in steps:
+                check_motion(s, head_pose=None, antennas=(left, right), body_yaw=None,
+                             duration=max(duration, lim.min_move_duration_s))
+            for (left, right), duration in steps:
+                d = max(duration, lim.min_move_duration_s)
+                await mo.send_goto({"antennas": [left, right], "duration": d, "interpolation": "minjerk"},
+                                   epoch=epoch)
+                sent += 1
+                await anyio.sleep(d)
+        except MotionInterrupted:
+            return {"gesture": name, "steps_sent": sent, "interrupted": True}
         return {"gesture": name, "steps_sent": sent}
 
     # -- tools ----------------------------------------------------------------------------
@@ -454,7 +451,7 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
                                     open_world_hint=True),
         endpoints=("POST /api/media/sounds/upload", "POST /api/media/play_sound",
                    "DELETE /api/media/sounds/{filename}", "POST /api/move/goto", "GET /api/state/doa",
-                   "GET /api/state/present_head_pose", "GET /api/camera/specs"),
+                   "GET /api/state/present_head_pose", "GET /api/camera/specs", "GET /api/daemon/status"),
     )
     async def converse(
         say_text: Annotated[
@@ -512,29 +509,40 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         if not (say_text or moving or listen_after or look_mode == "after"):
             return [json.dumps({"error": "nothing to do: give say_text, a motion, listen_after or look"})]
         # Resolve the head target before acting, so an invalid request does nothing at all.
+        epoch = mo.epoch  # a stop_all_moves from now on cancels the motion of this turn
         head: dict[str, Any] | None = None
+        present: dict[str, float] | None = None
         if look_at_point is not None:
             head = await head_toward_point(*look_at_point)
+            present = await mo.present_head()
         elif head_turn is not None:
-            now = await present_head() or {"pitch": 0.0, "yaw": 0.0}
-            pose, clamped = clamp_head(now["pitch"] + head_turn[1], now["yaw"] + head_turn[0])
-            head = {"head_pose": pose, "clamped": clamped}
+            base, source, present = await mo.head_reference()
+            base = base or {"pitch": 0.0, "yaw": 0.0}
+            pose, clamped = clamp_head(base["pitch"] + head_turn[1], base["yaw"] + head_turn[0])
+            head = {"head_pose": pose, "clamped": clamped, "from": source}
+        result: dict[str, Any] = {}
+        if moving:
+            result["preconditions"] = await mo.preflight()
         if say_text or moving:
             logger.info("action_requested tool=converse say=%r gesture=%s head=%s",
                         (say_text or "")[:80], gesture_name, head and head["head_pose"])
         t0 = time.perf_counter()
-        result: dict[str, Any] = {}
 
         async def motion() -> None:
             # Head first, then the gesture (two concurrent goto moves would fight each other).
             if head is not None:
                 pose = head["head_pose"]
-                duration = min(1.5, max(0.6, 0.4 + max(abs(pose["yaw"]), abs(pose["pitch"]))))
-                head["move_uuid"] = await send_head(pose, duration)
+                duration = mo.head_duration(present, pose)
+                head["duration_s"] = duration
                 result["head"] = head
+                try:
+                    head["move_uuid"] = await send_head(pose, duration, epoch)
+                except MotionInterrupted:
+                    head["interrupted"] = True
+                    return
                 await anyio.sleep(duration)
             if gesture_name != "aucun":
-                result["gesture"] = await gesture(gesture_name, base=head and head["head_pose"])
+                result["gesture"] = await gesture(gesture_name, epoch, base=head and head["head_pose"])
 
         if say_text and moving:
             spoken, _ = await asyncio.gather(say(say_text, speed, True, language), motion())
@@ -565,12 +573,14 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         server,
         deps,
         risk=Risk.PHYSICAL,
-        endpoints=("GET /api/daemon/status", "GET /api/camera/specs", "POST /api/move/goto"),
+        endpoints=("GET /api/daemon/status", "GET /api/camera/specs", "GET /api/state/present_head_pose",
+                   "POST /api/move/goto"),
     )
     async def look_at_point(
         x: Annotated[float, Field(ge=0, description="Pixel column in the last image (0 = left edge).")],
         y: Annotated[float, Field(ge=0, description="Pixel row in the last image (0 = top edge).")],
-        duration: Annotated[float, Field(ge=0.3, le=5)] = 0.8,
+        duration: Annotated[float | None, Field(ge=0.3, le=5, description="Seconds; by default it grows with "
+                                                "the turn. Raised if needed to respect the head speed limit.")] = None,
     ) -> dict[str, Any]:
         """Turn the head so that the pixel (x, y) of the LAST image returned (capture_image or
         converse) comes to the center of the view, e.g. to center an object someone shows.
@@ -581,11 +591,11 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         degrees off near the edges; take a new image to check and refine.
         """
         head = await head_toward_point(x, y)
-        status = await c.get("/api/daemon/status")
-        if status.get("state") != "running":
-            return {"turned": False, "reason": f"daemon state {status.get('state')!r}"}
-        move_uuid = await send_head(head["head_pose"], duration)
-        return {"turned": True, **head, "move_uuid": move_uuid, "completion_confirmed": False}
+        pre = await mo.preflight()
+        d = mo.head_duration(await mo.present_head(), head["head_pose"], duration)
+        uid = await send_head(head["head_pose"], d)
+        return {"turned": True, **head, "duration_s": d, "move_uuid": uid, "completion_confirmed": False,
+                "preconditions": pre}
 
     @register(
         server,
@@ -596,25 +606,32 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
     async def nudge_head(
         yaw: Annotated[float, Field(ge=-1.0, le=1.0, description="Relative yaw in radians (> 0 = Reachy's left).")] = 0.0,
         pitch: Annotated[float, Field(ge=-0.6, le=0.6, description="Relative pitch in radians (> 0 = down).")] = 0.0,
-        duration: Annotated[float, Field(ge=0.3, le=5)] = 0.8,
+        duration: Annotated[float | None, Field(ge=0.3, le=5, description="Seconds; by default it grows with "
+                                                "the turn. Raised if needed to respect the head speed limit.")] = None,
     ) -> dict[str, Any]:
         """Turn the head by a small amount relative to where it points now ("a bit to the right":
         yaw=-0.15). The head is also straightened (roll 0). Clamped to the guard rails.
-        """
-        status = await c.get("/api/daemon/status")
-        if status.get("state") != "running":
-            return {"turned": False, "reason": f"daemon state {status.get('state')!r}"}
-        now = await present_head()
-        if now is None:
-            return {"turned": False, "reason": "present head pose unavailable"}
-        pose, clamped = clamp_head(now["pitch"] + pitch, now["yaw"] + yaw)
-        move_uuid = await send_head(pose, duration)
-        return {"turned": True, "from": {"pitch": round(now["pitch"], 4), "yaw": round(now["yaw"], 4)},
-                "head_pose": pose, "clamped": clamped, "move_uuid": move_uuid, "completion_confirmed": False}
 
-    @register(server, deps, risk=Risk.PHYSICAL, endpoints=("GET /api/state/doa", "POST /api/move/goto"))
+        The turn is added to the last head target this server commanded (the head sags a little
+        below its target, and adding to the measured pose would compound that), unless something
+        else moved the head since; `reference` says which pose was used.
+        """
+        pre = await mo.preflight()
+        base, source, present = await mo.head_reference()
+        if base is None:
+            return {"turned": False, "reason": "present head pose unavailable"}
+        pose, clamped = clamp_head(base["pitch"] + pitch, base["yaw"] + yaw)
+        d = mo.head_duration(present, pose, duration)
+        uid = await send_head(pose, d)
+        return {"turned": True, "from": {"pitch": round(base["pitch"], 4), "yaw": round(base["yaw"], 4)},
+                "reference": source, "head_pose": pose, "clamped": clamped, "duration_s": d, "move_uuid": uid,
+                "completion_confirmed": False, "preconditions": pre}
+
+    @register(server, deps, risk=Risk.PHYSICAL, endpoints=("GET /api/state/doa", "GET /api/daemon/status",
+                                                        "GET /api/state/present_head_pose", "POST /api/move/goto"))
     async def turn_toward_sound(
-        duration: Annotated[float, Field(ge=0.3, le=5)] = 0.8,
+        duration: Annotated[float | None, Field(ge=0.3, le=5, description="Seconds; by default it grows with "
+                                                "the turn. Raised if needed to respect the head speed limit.")] = None,
     ) -> dict[str, Any]:
         """Turn the head (yaw) toward the direction the last sound came from (microphone-array DoA).
 
@@ -629,11 +646,8 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
             return {"turned": False, "reason": f"invalid direction of arrival {doa.get('angle')!r}"}
         yaw = max(-lim.max_head_yaw_rad, min(lim.max_head_yaw_rad, yaw))
         pose = {"x": 0.0, "y": 0.0, "z": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": round(yaw, 4)}
-        check_motion(s, head_pose=HeadPose(**pose), antennas=None, body_yaw=None, duration=duration)
-        status = await c.get("/api/daemon/status")
-        if status.get("state") != "running":
-            return {"turned": False, "reason": f"daemon state {status.get('state')!r}"}
-        move = await c.post("/api/move/goto", json_body={"head_pose": pose, "duration": duration,
-                                                          "interpolation": "minjerk"})
-        return {"turned": True, "doa": doa, "target_yaw_rad": pose["yaw"], "move_uuid": move.get("uuid"),
-                "completion_confirmed": False}
+        pre = await mo.preflight()
+        d = mo.head_duration(await mo.present_head(), pose, duration)
+        uid = await send_head(pose, d)
+        return {"turned": True, "doa": doa, "target_yaw_rad": pose["yaw"], "duration_s": d, "move_uuid": uid,
+                "completion_confirmed": False, "preconditions": pre}

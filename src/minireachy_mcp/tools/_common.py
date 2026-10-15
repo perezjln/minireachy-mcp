@@ -8,7 +8,7 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import anyio
@@ -21,6 +21,7 @@ from ..config import Settings
 from ..errors import DaemonError, SafetyGateError
 from ..media.webrtc import MediaUnavailableError
 from ..safety import Risk, require
+from ._motion import Motion
 
 logger = logging.getLogger("minireachy_mcp.tools")
 
@@ -43,6 +44,10 @@ class Deps:
     client: MiniReachyClient
     registry: dict[str, ToolSpec]
     media: Any = None  # minireachy_mcp.media.services.MediaServices
+    motion: Motion = field(init=False)  # shared by every tool that moves the robot
+
+    def __post_init__(self) -> None:
+        self.motion = Motion(self.settings, self.client)
 
 
 _ANNOTATIONS = {

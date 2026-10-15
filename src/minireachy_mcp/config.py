@@ -38,6 +38,8 @@ class MotionLimits(BaseModel):
     max_antenna_rad: float = Field(3.0, gt=0, le=6.3)
     min_move_duration_s: float = Field(0.3, gt=0, le=10)
     max_move_duration_s: float = Field(10.0, gt=0, le=120)
+    # Average angular speed of the head (largest of roll/pitch/yaw change / duration).
+    max_head_speed_rad_s: float = Field(2.0, gt=0, le=20)
 
     @model_validator(mode="after")
     def _check_durations(self) -> MotionLimits:
@@ -201,6 +203,7 @@ _LIMITS = {
     "LIMIT_ANTENNA_RAD": "max_antenna_rad",
     "LIMIT_MIN_MOVE_DURATION_S": "min_move_duration_s",
     "LIMIT_MAX_MOVE_DURATION_S": "max_move_duration_s",
+    "LIMIT_HEAD_SPEED_RAD_S": "max_head_speed_rad_s",
 }
 
 

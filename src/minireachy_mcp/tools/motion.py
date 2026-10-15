@@ -9,9 +9,8 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from ..client import seg
-from ..errors import SafetyGateError
 from ..models import DATASET_NAME, SAFE_NAME, HeadPose, InterpolationTechnique, MotorControlMode
-from ..safety import Risk, check_motion
+from ..safety import Risk, check_head_speed, check_motion
 from ._common import Deps, accepted, register
 
 _POLL_INTERVAL_S = 0.2
@@ -19,23 +18,9 @@ _POLL_INTERVAL_S = 0.2
 
 def register_tools(server: MCPServer, deps: Deps) -> None:
     c = deps.client
+    mo = deps.motion
     lim = deps.settings.limits
-
-    async def preflight() -> dict[str, Any]:
-        """Read-only checks before a motion command. Refuses if the daemon is not running."""
-        status = await c.get("/api/daemon/status")
-        state = status.get("state") if isinstance(status, dict) else None
-        if state != "running":
-            raise SafetyGateError(f"Daemon state is {state!r}, not 'running'; motion commands are not sent.")
-        backend = status.get("backend_status") or {}
-        mode = backend.get("motor_control_mode")
-        info: dict[str, Any] = {"daemon_state": state, "motor_control_mode": mode}
-        if mode != "enabled":
-            info["warning"] = (
-                f"Motors are in mode {mode!r}: the robot may not follow the commanded motion "
-                "(use set_motor_mode('enabled') if appropriate)."
-            )
-        return info
+    preflight = mo.preflight
 
     def move_result(action: str, response: Any, pre: dict[str, Any]) -> dict[str, Any]:
         move_uuid = response.get("uuid") if isinstance(response, dict) else None
@@ -85,7 +70,7 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
                 return {"move_uuid": target, "running": True, "timed_out": True}
             await anyio.sleep(_POLL_INTERVAL_S)
 
-    @register(server, deps, risk=Risk.PHYSICAL, endpoints=("POST /api/move/goto",))
+    @register(server, deps, risk=Risk.PHYSICAL, endpoints=("POST /api/move/goto", "GET /api/state/present_head_pose"))
     async def goto_pose(
         duration: Annotated[
             float,
@@ -116,10 +101,13 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
 
         At least one of head_pose, antennas, body_yaw is required. The daemon answers as soon as
         the move is scheduled: the result contains move_uuid but completion is NOT confirmed.
-        Use wait_for_move then get_full_state to verify the final position.
+        Use wait_for_move then get_full_state to verify the final position. A head move faster
+        than the speed guard rail (from the present head pose) is refused with the minimum duration.
         """
         check_motion(deps.settings, head_pose=head_pose, antennas=antennas, body_yaw=body_yaw, duration=duration)
         pre = await preflight()
+        if head_pose is not None and (present := await mo.present_head()) is not None:
+            check_head_speed(deps.settings, start=present, target=head_pose.model_dump(), duration=duration)
         body: dict[str, Any] = {"duration": duration, "interpolation": interpolation.value}
         if head_pose is not None:
             body["head_pose"] = head_pose.model_dump()
@@ -127,12 +115,13 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
             body["antennas"] = list(antennas)
         if body_yaw is not None:
             body["body_yaw"] = body_yaw
-        return move_result("goto_pose", await c.post("/api/move/goto", json_body=body), pre)
+        return move_result("goto_pose", await mo.send_goto(body), pre)
 
     @register(server, deps, risk=Risk.PHYSICAL, endpoints=("POST /api/move/play/wake_up",))
     async def wake_up() -> dict[str, Any]:
         """Play the robot's built-in wake-up motion. Returns the move UUID (completion not confirmed)."""
         pre = await preflight()
+        mo.forget_head_target()
         return move_result("wake_up", await c.post("/api/move/play/wake_up"), pre)
 
     @register(server, deps, risk=Risk.PHYSICAL, endpoints=("POST /api/move/play/goto_sleep",))
@@ -142,6 +131,7 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         Returns the move UUID (completion not confirmed).
         """
         pre = await preflight()
+        mo.forget_head_target()
         return move_result("goto_sleep", await c.post("/api/move/play/goto_sleep"), pre)
 
     @register(server, deps, risk=Risk.READ, endpoints=("GET /api/move/recorded-move-datasets/list/{dataset_name}",))
@@ -178,12 +168,14 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         goto guard rails. Returns the move UUID (completion not confirmed).
         """
         pre = await preflight()
+        mo.forget_head_target()
         path = f"/api/move/play/recorded-move-dataset/{seg(dataset_name)}/{seg(move_name)}"
         return move_result("play_recorded_move", await c.post(path), pre)
 
     @register(server, deps, risk=Risk.STOP, endpoints=("POST /api/move/stop",))
     async def stop_move(move_uuid: uuid.UUID) -> dict[str, Any]:
         """Stop one running move by UUID. Always allowed. The robot holds its current position."""
+        mo.forget_head_target()
         response = await c.post("/api/move/stop", json_body={"uuid": str(move_uuid)})
         return {"move_uuid": str(move_uuid), "daemon_response": response}
 
@@ -193,7 +185,9 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
 
         This is NOT a hardware emergency stop: the daemon exposes none. It does not stop
         apps (use stop_current_app) nor audio-reactive wobbling (use disable_wobbling).
+        Gestures in progress (converse) send no further step.
         """
+        await mo.interrupt()  # first, so no gesture step is sent after the running list is read
         moves = await c.get("/api/move/running")
         results: list[dict[str, Any]] = []
         for m in moves:
@@ -219,6 +213,7 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
 
         WARNING: 'disabled' removes torque; place the robot in a safe pose first (goto_sleep).
         """
+        mo.forget_head_target()
         response = await c.post(f"/api/motors/set_mode/{seg(mode.value)}")
         after = await c.get("/api/motors/status")
         confirmed = isinstance(after, dict) and after.get("mode") == mode.value

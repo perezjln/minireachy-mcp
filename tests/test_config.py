@@ -30,11 +30,13 @@ def test_full_environment() -> None:
         "MCP_ALLOWED_HOSTS": "a:*, b:1",
         "LIMIT_HEAD_YAW_RAD": "0.5",
         "LIMIT_MAX_MOVE_DURATION_S": "4",
+        "LIMIT_HEAD_SPEED_RAD_S": "1.5",
     })
     assert s.base_url == "http://192.168.1.20:8000"
     assert s.read_timeout_s == 5 and s.mcp_port == 9000
     assert s.mcp_allowed_hosts == ("a:*", "b:1")
     assert s.limits.max_head_yaw_rad == 0.5 and s.limits.max_move_duration_s == 4
+    assert s.limits.max_head_speed_rad_s == 1.5
 
 
 @pytest.mark.parametrize(
