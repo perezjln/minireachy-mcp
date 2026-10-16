@@ -99,6 +99,7 @@ class Recorded:
     query: dict[str, str]
     body: Any
     raw_path: str
+    at: float = field(default_factory=time.monotonic)  # arrival time
 
 
 @dataclass

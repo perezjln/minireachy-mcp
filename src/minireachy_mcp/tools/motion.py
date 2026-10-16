@@ -14,6 +14,8 @@ from ..safety import Risk, check_head_speed, check_motion
 from ._common import Deps, accepted, register
 
 _POLL_INTERVAL_S = 0.2
+# How long stop_all_moves waits for a goto already in flight before its second pass.
+_SETTLE_TIMEOUT_S = 2.0
 
 
 def register_tools(server: MCPServer, deps: Deps) -> None:
@@ -106,8 +108,11 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         """
         check_motion(deps.settings, head_pose=head_pose, antennas=antennas, body_yaw=body_yaw, duration=duration)
         pre = await preflight()
-        if head_pose is not None and (present := await mo.present_head()) is not None:
-            check_head_speed(deps.settings, start=present, target=head_pose.model_dump(), duration=duration)
+        if head_pose is not None:
+            target = head_pose.model_dump()
+            # Unknown present pose: check the speed from the worst case rather than not at all.
+            start = await mo.present_head() or mo.worst_case_start(target)
+            check_head_speed(deps.settings, start=start, target=target, duration=duration)
         body: dict[str, Any] = {"duration": duration, "interpolation": interpolation.value}
         if head_pose is not None:
             body["head_pose"] = head_pose.model_dump()
@@ -187,17 +192,32 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         apps (use stop_current_app) nor audio-reactive wobbling (use disable_wobbling).
         Gestures in progress (converse) send no further step.
         """
-        await mo.interrupt()  # first, so no gesture step is sent after the running list is read
-        moves = await c.get("/api/move/running")
-        results: list[dict[str, Any]] = []
-        for m in moves:
-            uid = m.get("uuid")
-            try:
-                results.append({"move_uuid": uid, "daemon_response": await c.post("/api/move/stop", json_body={"uuid": uid})})
-            except Exception as exc:  # report and keep stopping the others
-                results.append({"move_uuid": uid, "error": getattr(exc, "to_llm", lambda: str(exc))()})
+        mo.interrupt()  # first, so no gesture step is sent after the running list is read
+
+        async def stop_listed(skip: set[str]) -> list[dict[str, Any]]:
+            results: list[dict[str, Any]] = []
+            for m in await c.get("/api/move/running"):
+                uid = m.get("uuid")
+                if uid in skip:
+                    continue
+                skip.add(uid)
+                try:
+                    results.append({"move_uuid": uid, "daemon_response": await c.post("/api/move/stop", json_body={"uuid": uid})})
+                except Exception as exc:  # report and keep stopping the others
+                    results.append({"move_uuid": uid, "error": getattr(exc, "to_llm", lambda: str(exc))()})
+            return results
+
+        handled: set[str] = set()
+        results = await stop_listed(handled)  # without waiting for a goto still in flight
+        # A goto in flight during the stop may schedule its move after the list above was read.
+        settled = await mo.settle(_SETTLE_TIMEOUT_S)
+        results += await stop_listed(handled)
         remaining = [m.get("uuid") for m in await c.get("/api/move/running")]
-        return {"stopped": results, "still_running": remaining}
+        out: dict[str, Any] = {"stopped": results, "still_running": remaining}
+        if not settled:
+            out["warning"] = ("A goto sent before the stop is still waiting for the daemon's answer; "
+                              "call list_running_moves and stop_all_moves again in a moment.")
+        return out
 
     @register(server, deps, risk=Risk.PHYSICAL, endpoints=("POST /api/motors/set_mode/{mode}", "GET /api/motors/status"))
     async def set_motor_mode(

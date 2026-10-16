@@ -89,7 +89,7 @@ async def test_unexpected_error_is_reported_and_logged(fake, mcp_session, caplog
 class _TaggedTTS(StubTTS):
     """Three sentences per call, each filled with a tag identifying the call, produced slowly."""
 
-    def stream(self, text, length_scale=None):
+    def stream(self, text, length_scale=None, *, speed=1.0):
         import time
 
         for _ in range(3):
@@ -99,6 +99,7 @@ class _TaggedTTS(StubTTS):
 
 class _OrderSpeaker:
     busy = False
+    generation = 0
 
     def __init__(self) -> None:
         self.order: list[int] = []

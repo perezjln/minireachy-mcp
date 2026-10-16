@@ -27,6 +27,7 @@ class StubSpeaker:
     def __init__(self) -> None:
         self.samples = 0
         self.cleared = 0
+        self.generation = 0
         self._busy = False
 
     def enqueue(self, pcm48: np.ndarray) -> None:
@@ -35,6 +36,7 @@ class StubSpeaker:
 
     def clear(self) -> None:
         self.cleared += 1
+        self.generation += 1
         self._busy = False
 
     @property
@@ -116,7 +118,7 @@ class StubTTS:
         self.voice_path = voice_path
         self.spoken: list[str] = []
 
-    def stream(self, text: str, length_scale: float | None = None):
+    def stream(self, text: str, length_scale: float | None = None, *, speed: float = 1.0):
         self.spoken.append(text)
         for _ in range(2):  # two "sentences" of 0.5 s at 22.05 kHz
             yield np.full(11025, 1000, dtype=np.int16), 22050
@@ -124,7 +126,7 @@ class StubTTS:
     def warmup(self) -> float:
         return 0.01
 
-    def synthesize(self, text: str, length_scale: float | None = None) -> Speech:
+    def synthesize(self, text: str, length_scale: float | None = None, *, speed: float = 1.0) -> Speech:
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
             wf.setnchannels(1)

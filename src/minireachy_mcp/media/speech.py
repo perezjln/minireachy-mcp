@@ -129,27 +129,29 @@ class TextToSpeech:
                 self._voice = PiperVoice.load(self.voice_path)
         return self._voice
 
-    def synthesize(self, text: str, length_scale: float | None = None) -> Speech:
-        """Blocking; run it in a worker thread. Returns a mono 16-bit WAV."""
+    def _config(self, length_scale: float | None, speed: float) -> Any:
+        """Piper config: `length_scale` (default: the configured one) divided by the speech `speed`."""
         from piper.config import SynthesisConfig
 
+        return SynthesisConfig(length_scale=(length_scale or self.length_scale) / speed)
+
+    def synthesize(self, text: str, length_scale: float | None = None, *, speed: float = 1.0) -> Speech:
+        """Blocking; run it in a worker thread. Returns a mono 16-bit WAV."""
         started = time.perf_counter()
         voice = self._load()
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
-            voice.synthesize_wav(text, wf, syn_config=SynthesisConfig(length_scale=length_scale or self.length_scale))
+            voice.synthesize_wav(text, wf, syn_config=self._config(length_scale, speed))
         data = buf.getvalue()
         with wave.open(io.BytesIO(data)) as wf:
             duration = wf.getnframes() / wf.getframerate()
         return Speech(wav=data, duration_s=round(duration, 2), seconds=round(time.perf_counter() - started, 2))
 
-    def stream(self, text: str, length_scale: float | None = None) -> Any:
+    def stream(self, text: str, length_scale: float | None = None, *, speed: float = 1.0) -> Any:
         """Blocking generator: yields (int16 mono samples, sample_rate) per sentence, as soon as
         each sentence is synthesised (the first one arrives after ~0.05 s)."""
-        from piper.config import SynthesisConfig
-
         voice = self._load()
-        for chunk in voice.synthesize(text, syn_config=SynthesisConfig(length_scale=length_scale or self.length_scale)):
+        for chunk in voice.synthesize(text, syn_config=self._config(length_scale, speed)):
             yield chunk.audio_int16_array, chunk.sample_rate
 
     def warmup(self) -> float:

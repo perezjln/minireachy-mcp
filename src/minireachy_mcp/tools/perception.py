@@ -1,13 +1,16 @@
 """Perception (camera, microphone) and voice tools built on the daemon's WebRTC media stream."""
 
 import asyncio
+import functools
 import io
 import json
 import logging
 import math
 import re
+import threading
 import time
 import uuid
+from collections.abc import Awaitable
 from typing import Annotated, Any, Literal
 
 import anyio
@@ -61,6 +64,18 @@ _VISUAL_CUES = re.compile(
 )
 # Horizontal field of view used when the daemon's camera specs cannot be interpreted.
 _FALLBACK_HFOV_RAD = math.radians(80)
+
+
+async def _together(*aws: Awaitable[Any]) -> list[Any]:
+    """Run concurrently; if one fails, cancel the others (asyncio.gather would leave them running)."""
+    tasks = [asyncio.ensure_future(a) for a in aws]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 def register_tools(server: MCPServer, deps: Deps) -> None:
@@ -165,41 +180,63 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
         return {**await say_daemon(tts, text, speed, wait), "voice": voice}
 
     async def say_webrtc(speaker: Any, tts: Any, text: str, speed: float, wait: bool) -> dict[str, Any]:
-        """Stream the voice on the media link, sentence by sentence, as soon as each is synthesised."""
+        """Stream the voice on the media link, sentence by sentence, as soon as each is synthesised.
+
+        stop_sound (speaker.clear) ends the speech: sentences synthesised afterwards are dropped and
+        synthesis stops at the next sentence. A cancelled or failed call also silences its speech.
+        """
         t0 = time.perf_counter()
         loop = asyncio.get_running_loop()
         chunks: asyncio.Queue[Any] = asyncio.Queue()
+        abandoned = threading.Event()
+        generation = speaker.generation
 
         def produce() -> None:  # worker thread
             try:
-                for pcm, rate in tts.stream(text, 1.0 / speed):
+                for pcm, rate in tts.stream(text, speed=speed):
+                    if abandoned.is_set():
+                        break
                     loop.call_soon_threadsafe(chunks.put_nowait, (pcm, rate))
             except Exception as exc:
                 loop.call_soon_threadsafe(chunks.put_nowait, exc)
             else:
                 loop.call_soon_threadsafe(chunks.put_nowait, None)
 
+        def stopped() -> bool:
+            return speaker.generation != generation
+
         producer = asyncio.ensure_future(anyio.to_thread.run_sync(produce))
         first_audio_s: float | None = None
         samples = 0
-        while (item := await chunks.get()) is not None:
-            if isinstance(item, Exception):
-                raise item
-            pcm48 = resample_int16(*item)
-            speaker.enqueue(pcm48)
-            samples += len(pcm48)
-            if first_audio_s is None:
-                first_audio_s = time.perf_counter() - t0
-        await producer
+        try:
+            while (item := await chunks.get()) is not None:
+                if isinstance(item, Exception):
+                    raise item
+                if stopped():  # stop_sound: drop the rest of the text
+                    abandoned.set()
+                    break
+                pcm48 = resample_int16(*item)
+                speaker.enqueue(pcm48)
+                samples += len(pcm48)
+                if first_audio_s is None:
+                    first_audio_s = time.perf_counter() - t0
+            await producer
+        except BaseException:
+            abandoned.set()
+            if not stopped():
+                speaker.clear()  # do not leave half a speech playing after an error or a cancellation
+            raise
         tts_total_s = time.perf_counter() - t0
-        playback = "started"
-        if wait:
+        playback = "stopped (stop_sound)" if stopped() else "started"
+        if wait and not stopped():
             try:  # the track is paced in real time: it drains in about the audio duration
                 await asyncio.wait_for(speaker.drained(), samples / 48_000 + 5.0)
             except TimeoutError:
                 speaker.clear()
                 raise MediaUnavailableError("the voice stream stalled (audio not consumed by the link)")
-            if m.link.speaker is not speaker:
+            if stopped():
+                playback = "stopped (stop_sound)"
+            elif m.link.speaker is not speaker:
                 playback = "interrupted (media link lost)"
             else:
                 await anyio.sleep(_WEBRTC_MARGIN_S)
@@ -215,7 +252,7 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
 
     async def say_daemon(tts: Any, text: str, speed: float, wait: bool) -> dict[str, Any]:
         t0 = time.perf_counter()
-        speech = await anyio.to_thread.run_sync(tts.synthesize, text, 1.0 / speed)
+        speech = await anyio.to_thread.run_sync(functools.partial(tts.synthesize, text, speed=speed))
         name = f"{_TTS_PREFIX}{uuid.uuid4().hex[:10]}.wav"
         await c.post("/api/media/sounds/upload", files={"file": (name, speech.wav, "audio/wav")})
         t_play = time.perf_counter()
@@ -545,7 +582,7 @@ def register_tools(server: MCPServer, deps: Deps) -> None:
                 result["gesture"] = await gesture(gesture_name, epoch, base=head and head["head_pose"])
 
         if say_text and moving:
-            spoken, _ = await asyncio.gather(say(say_text, speed, True, language), motion())
+            spoken, _ = await _together(say(say_text, speed, True, language), motion())
             result.update(spoken)
         elif say_text:
             result.update(await say(say_text, speed, True, language))

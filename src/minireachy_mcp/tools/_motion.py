@@ -56,11 +56,18 @@ class Motion:
         """Something other than a head goto drives the head now (stop, built-in or recorded move)."""
         self._head_target = None
 
-    async def interrupt(self) -> None:
-        """Make running sequences stop sending; waits for a send in flight so it can be stopped too."""
-        async with self._lock:
-            self._epoch += 1
-            self._head_target = None
+    def interrupt(self) -> None:
+        """Make running sequences stop sending. Immediate: never waits for a goto in flight."""
+        self._epoch += 1
+        self._head_target = None
+
+    async def settle(self, timeout_s: float) -> bool:
+        """Wait (at most `timeout_s`) for a goto that was already in flight to be answered, so a
+        move it scheduled can be stopped too. False if it is still pending."""
+        with anyio.move_on_after(timeout_s):
+            async with self._lock:
+                return True
+        return False
 
     # -- reads -------------------------------------------------------------------------------
 
@@ -117,12 +124,19 @@ class Motion:
         pose = {"x": 0.0, "y": 0.0, "z": 0.0, "roll": 0.0, "pitch": round(p, 4), "yaw": round(y, 4)}
         return pose, (p, y) != (pitch, yaw)
 
+    def worst_case_start(self, target: dict[str, float]) -> dict[str, float]:
+        """Where the head may be when its pose cannot be read: the far end of each guard rail."""
+        bounds = {"roll": self.limits.max_head_roll_rad, "pitch": self.limits.max_head_pitch_rad,
+                  "yaw": self.limits.max_head_yaw_rad}
+        return {a: -math.copysign(b, float(target.get(a, 0.0))) for a, b in bounds.items()}
+
     def head_duration(
         self, start: dict[str, float] | None, target: dict[str, float], requested: float | None = None
     ) -> float:
         """Duration of a head move: `requested`, or one that grows with the turn (0.6–1.5 s), and
-        never shorter than what the speed guard rail allows from `start` (the measured pose)."""
-        delta = head_delta(start, target) if start is not None else 0.0
+        never shorter than what the speed guard rail allows from `start` (the measured pose; when
+        it is unknown, from the worst case allowed by the guard rails)."""
+        delta = head_delta(start if start is not None else self.worst_case_start(target), target)
         duration = requested if requested is not None else min(1.5, max(0.6, 0.4 + delta))
         duration = max(duration, delta / self.limits.max_head_speed_rad_s, self.limits.min_move_duration_s)
         return round(min(duration, self.limits.max_move_duration_s), 3)
@@ -137,8 +151,10 @@ class Motion:
         async with self._lock:
             if epoch is not None and epoch != self._epoch:
                 raise MotionInterrupted
+            sent_under = self._epoch
             move = await self.client.post("/api/move/goto", json_body=body)
-            if body.get("head_pose") is not None:
+            # A stop during the request forgot the target: do not bring it back.
+            if body.get("head_pose") is not None and sent_under == self._epoch:
                 self._head_target = {a: float(body["head_pose"].get(a, 0.0)) for a in _AXES}
         return move
 

@@ -55,6 +55,8 @@ def create_speaker_track() -> Any:
             self._drained.set()
             self.frames_sent = 0
             self.speech_frames_sent = 0
+            # Bumped by clear(): a speech started under an older generation must enqueue nothing more.
+            self.generation = 0
             self.last_frame_at: float | None = None
 
         # -- producer side ------------------------------------------------------------
@@ -66,6 +68,7 @@ def create_speaker_track() -> Any:
                 self._drained.clear()
 
         def clear(self) -> None:
+            self.generation += 1
             self._queue.clear()
             self._queued = 0
             self._drained.set()
